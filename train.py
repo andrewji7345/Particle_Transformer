@@ -177,10 +177,10 @@ class PairwiseFeatureBuilder(nn.Module):
 
         pair_features = torch.stack(
             (
-                torch.log(deltaR),
-                torch.log(kt),
-                torch.log(z),
-                torch.log(m2),
+                torch.log(torch.clamp(deltaR, min=1e-8)),
+                torch.log(torch.clamp(kt, min=1e-8)),
+                torch.log(torch.clamp(z, min=1e-8)),
+                torch.log(torch.clamp(m2, min=1e-8)),
             ),
             dim=-1,
         )
@@ -323,8 +323,6 @@ class ParticleMultiHeadAttention(nn.Module):
         self.k_proj = nn.Linear(EMBED_DIM, EMBED_DIM)
         self.v_proj = nn.Linear(EMBED_DIM, EMBED_DIM)
 
-        self.out_proj = nn.Linear(EMBED_DIM, EMBED_DIM)
-
         self.dropout = nn.Dropout(DROPOUT)
 
     def forward(self, x, attn_bias, mask):
@@ -369,7 +367,7 @@ class ParticleMultiHeadAttention(nn.Module):
 
         scores = scores.masked_fill(
             ~key_mask,
-            float("-inf"),
+            float(-1e9),
         )
 
         ############################################################
@@ -404,7 +402,10 @@ class ParticleMultiHeadAttention(nn.Module):
             EMBED_DIM,
         )
 
-        output = self.out_proj(output)
+        output.masked_fill(
+            ~mask.unsqueeze(-1),
+            0.,
+        )
 
         return output
 
@@ -427,12 +428,18 @@ class ParticleAttentionBlock(nn.Module):
 
         self.norm2 = nn.LayerNorm(EMBED_DIM)
 
-        self.mlp = nn.Sequential(
-            nn.Linear(EMBED_DIM, EMBED_DIM * MLP_RATIO),
-            nn.GELU(),
-            nn.Dropout(DROPOUT),
-            nn.Linear(EMBED_DIM * MLP_RATIO, EMBED_DIM),
-            nn.Dropout(DROPOUT),
+        self.norm3 = nn.LayerNorm(EMBED_DIM)
+
+        self.fc1 = nn.Linear(
+            EMBED_DIM,
+            EMBED_DIM * MLP_RATIO,
+        )
+
+        self.norm4 = nn.LayerNorm(EMBED_DIM * MLP_RATIO)
+
+        self.fc2 = nn.Linear(
+            EMBED_DIM * MLP_RATIO,
+            EMBED_DIM,
         )
 
     def forward(
@@ -443,14 +450,26 @@ class ParticleAttentionBlock(nn.Module):
     ):
 
         # Self-attention
-        x = x + self.attention(
-            self.norm1(x),
-            attn_bias,
-            mask,
+        x = x + self.norm2(
+            self.attention(
+                self.norm1(x),
+                attn_bias,
+                mask,
+            )
         )
 
         # Feed-forward network
-        x = x + self.mlp(self.norm2(x))
+        y = self.norm3(x)
+
+        y = self.fc1(y)
+
+        y = F.gelu(y)
+
+        y = self.norm4(y)
+
+        y = self.fc2(y)
+
+        x = x + y
 
         return x
 
@@ -617,36 +636,72 @@ class ParticleTransformerDataset(Dataset):
 # Dataset loading helper
 ###########################################################################
 
-def load_particle_datasets(path):
+def load_particle_datasets(dataset_name, pt_dir="ptfiles"):
     """
-    Load preprocessed tensors and construct train/val/test datasets.
+    Load all shards for a dataset and construct train/val/test datasets.
     """
 
-    dataset = torch.load(
-        path,
-        weights_only=False,
-    )
+    pt_dir = Path(pt_dir)
 
-    train_dataset = ParticleTransformerDataset(
-        dataset,
-        dataset["train_idx"],
-    )
+    shard_paths = sorted(pt_dir.glob(f"{dataset_name}_shard*.pt"))
 
-    val_dataset = ParticleTransformerDataset(
-        dataset,
-        dataset["val_idx"],
-    )
+    if len(shard_paths) == 0:
+        raise FileNotFoundError(
+            f"No shards found matching {dataset_name}_shard*.pt"
+        )
 
-    test_dataset = ParticleTransformerDataset(
-        dataset,
-        dataset["test_idx"],
-    )
+    datasets = []
 
-    return (
-        train_dataset,
-        val_dataset,
-        test_dataset,
-    )
+    for path in shard_paths:
+        print(f"Loading {path}")
+        datasets.append(torch.load(path, weights_only=False))
+
+    # Keys that should NOT simply be concatenated
+    index_keys = {
+        "train_idx",
+        "val_idx",
+        "test_idx",
+    }
+
+    merged = {}
+
+    for key in datasets[0].keys():
+        if key not in index_keys:
+            merged[key] = torch.cat(
+                [d[key] for d in datasets],
+                dim=0,
+            )
+
+    # Merge indices with proper offsets
+    train_idx = []
+    val_idx = []
+    test_idx = []
+
+    offset = 0
+
+    train_idx = []
+    val_idx = []
+    test_idx = []
+
+    for d in datasets:
+
+        n_events = d["particles"].shape[0]
+
+        train_idx.append(d["train_idx"] + offset)
+        val_idx.append(d["val_idx"] + offset)
+        test_idx.append(d["test_idx"] + offset)
+
+        offset += n_events
+
+    merged["train_idx"] = torch.cat(train_idx)
+    merged["val_idx"] = torch.cat(val_idx)
+    merged["test_idx"] = torch.cat(test_idx)
+
+    train_dataset = ParticleTransformerDataset(merged, merged["train_idx"])
+    val_dataset = ParticleTransformerDataset(merged, merged["val_idx"])
+    test_dataset = ParticleTransformerDataset(merged, merged["test_idx"])
+
+    return (train_dataset, val_dataset, test_dataset)
 
 ###########################################################################
 # Training utilities
@@ -696,7 +751,7 @@ def train_one_epoch(
         logits = outputs["logits"]
 
         # Compute loss
-        # logits: (B,N,3)
+        # logits: (B,N,NUM_CLASSES)
         # labels: (B,N)
 
         loss = criterion(
@@ -813,6 +868,8 @@ def train(
         pin_memory=True,
     )
 
+    print("Finished loading data")
+
     # Determine input feature dimension
     sample = train_dataset[0]
 
@@ -835,6 +892,8 @@ def train(
 
     # Training loop
     best_val_loss = float("inf")
+    train_losses = torch.zeros(epochs)
+    val_losses = torch.zeros(epochs)
 
     for epoch in range(epochs):
         train_loss = train_one_epoch(
@@ -858,6 +917,9 @@ def train(
             f"| val loss = {val_loss:.5f}"
         )
 
+        train_losses[epoch] = train_loss
+        val_losses[epoch] = val_loss
+
         # Save best checkpoint
         if val_loss < best_val_loss:
 
@@ -865,15 +927,22 @@ def train(
 
             torch.save(
                 {
-                    "epoch": epoch,
+                    "state_epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": val_loss,
                 },
                 "checkpoints/" + output_path + ".pt",
             )
 
-            print("Saved best model.")
+    # Save losses
+    torch.save(
+        {
+            "epoch": torch.arange(1, epochs+1),
+            "train_loss": train_losses,
+            "val_loss": val_losses,
+        },
+        "checkpoints/" + output_path + "_losses.pt"
+    )
 
 ###########################################################################
 # Main
@@ -900,8 +969,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--input",
         type=str,
-        default="ptfiles/WbWb_4000_1000_shard0000.pt",
-        help="Input preprocessed .pt file",
+        default="WbWb_4000_1000",
+        help="Input preprocessed file",
     )
 
     parser.add_argument(
@@ -921,7 +990,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=1e-4,
+        default=1e-5,
         help="Learning rate",
     )
 

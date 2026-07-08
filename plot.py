@@ -13,7 +13,7 @@ def main(args):
         raise KeyError("Checkpoint does not contain 'train_loss'.")
 
     train_loss = checkpoint["train_loss"]
-    val_loss = checkpoint.get("val_loss", None)
+    val_loss = checkpoint["val_loss"]
 
     # Create output directory
     output_dir = Path(args.output_dir)
@@ -39,7 +39,7 @@ def main(args):
             label="Validation Loss",
         )
 
-        best_epoch = val_loss.index(min(val_loss)) + 1
+        best_epoch = torch.argmin(val_loss).item() + 1
         best_loss = min(val_loss)
 
         plt.scatter(
@@ -75,15 +75,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "-c",
-        "--checkpoint",
+        "--loss-checkpoint",
         type=Path,
-        default=Path("checkpoints/model.pt"),
-        help="Training checkpoint",
+        default=Path("checkpoints/test_model_losses.pt"),
+        help="Training and validation losses",
     )
 
     parser.add_argument(
-        "-o",
+        "--model-checkpoint",
+        type=Path,
+        default=Path("checkpoints/test_model.pt"),
+        help="Model checkpoint",
+    )
+
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("plots"),

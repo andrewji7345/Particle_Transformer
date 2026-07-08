@@ -260,7 +260,7 @@ def process_events(arrays):
     """
 
     ##########################################################
-    # Extract particle-level branches
+    # Extract particle-level branches, ordering by pt
     ##########################################################
 
     pt     = arrays["particle_pt"]
@@ -273,6 +273,19 @@ def process_events(arrays):
 
     dxy    = arrays["particle_dxy"]
     dz     = arrays["particle_dz"]
+
+    for i in range(len(pt)):
+        order     = np.argsort(np.asarray(pt[i]))[::-1]
+        pt[i]     = pt[i][order]
+        eta[i]    = eta[i][order]
+        phi[i]    = phi[i][order]
+        energy[i] = energy[i][order]
+
+        charge[i] = charge[i][order]
+        pdgid[i]  = pdgid[i][order]
+
+        dxy[i]    = dxy[i][order]
+        dz[i]     = dz[i][order]
 
     features = build_features(
         pt,
@@ -391,6 +404,7 @@ def build_targets(arrays):
     ).astype(np.float32)
 
     truthLabel = arrays["particle_truthLabel"]
+
     truthLabel = ak.where(
         (truthLabel >= 1) & (truthLabel <= 11),
         1,
@@ -402,6 +416,12 @@ def build_targets(arrays):
         2,
         truthLabel,
     )
+
+    pt_temp = arrays["particle_pt"]
+
+    for i in range(len(pt_temp)):
+        order = np.argsort(np.asarray(pt_temp[i]))[::-1]
+        truthLabel[i] = truthLabel[i][order]
 
     targets["truthLabel"] = pad_array(truthLabel, pad_value = -2).astype(np.int64)
 
