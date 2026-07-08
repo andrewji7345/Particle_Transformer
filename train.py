@@ -26,6 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import argparse
+from pathlib import Path
 
 ###########################################################################
 # Model hyperparameters
@@ -42,7 +43,7 @@ MLP_RATIO = 4
 DROPOUT = 0.1
 
 INTERACTION_DIM = 16
-NUM_CLASSES = 3
+NUM_CLASSES = 4
 
 ###########################################################################
 # Particle embedding
@@ -114,10 +115,10 @@ class PairwiseFeatureBuilder(nn.Module):
         pair_features : (B, N, N, 4)
 
     Feature ordering:
-        0 : \DeltaR = \sqrt((y_a - y_b)^2 + (\phi_a - \phi_b)^2)
-        1 : kt = min(p_{T,a}, p_{T,b}) * \DeltaR
+        0 : DeltaR = sqrt((y_a - y_b)^2 + (phi_a - phi_b)^2)
+        1 : kt = min(p_{T,a}, p_{T,b}) * DeltaR
         2 : z = min(p_{T,a}, p_{T,b}) / (p_{T,a} + p_{T,b})
-        3 : m^2 = (E_a + E_b)^2 - |\vec{p_a} + \vec{p_b}|^2
+        3 : m^2 = (E_a + E_b)^2 - |vec{p_a} + vec{p_b}|^2
     """
 
     def __init__(self):
@@ -126,7 +127,7 @@ class PairwiseFeatureBuilder(nn.Module):
     @staticmethod
     def delta_phi(phi1, phi2):
         """
-        Compute wrapped \Delta\phi in [-\pi, \pi].
+        Compute wrapped Deltaphi in [-pi, pi].
         """
 
         return (phi1 - phi2 + math.pi) % (2 * math.pi) - math.pi
@@ -781,7 +782,7 @@ def train(
     epochs=50,
     batch_size=64,
     learning_rate=1e-4,
-    output_path,
+    output_path="test_model",
 ):
 
     # Device
@@ -822,8 +823,8 @@ def train(
 
     model = model.to(device)
 
-    # Loss
-    criterion = nn.CrossEntropyLoss()
+    # Loss, ignoring pad
+    criterion = nn.CrossEntropyLoss(ignore_index=-2)
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -869,7 +870,7 @@ def train(
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": val_loss,
                 },
-                output_path,
+                "checkpoints/" + output_path + ".pt",
             )
 
             print("Saved best model.")
@@ -879,6 +880,8 @@ def train(
 ###########################################################################
 
 def main(args):
+
+    Path("checkpoints").mkdir(parents=True, exist_ok=True)
 
     train(
         dataset_path=args.input,
@@ -895,7 +898,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "input",
+        "--input",
         type=str,
         default="ptfiles/WbWb_4000_1000_shard0000.pt",
         help="Input preprocessed .pt file",
@@ -904,7 +907,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--epochs",
         type=int,
-        default=50,
+        default=10,
         help="Number of training epochs",
     )
 
@@ -926,7 +929,7 @@ if __name__ == "__main__":
         "-o",
         "--output",
         type=str,
-        default="checkpoints/particle_transformer.pt",
+        default="test_model",
         help="Output checkpoint file",
     )
 
