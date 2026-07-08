@@ -7,42 +7,55 @@ import torch
 
 def main(args):
     # Load checkpoint
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    checkpoint = torch.load(args.loss_checkpoint, map_location="cpu")
 
-    if "train_loss" not in checkpoint:
-        raise KeyError("Checkpoint does not contain 'train_loss'.")
+    required_keys = [
+        "train_loss",
+        "val_loss",
+        "train_acc",
+        "val_acc",
+    ]
+
+    for key in required_keys:
+        if key not in checkpoint:
+            raise KeyError(f"Checkpoint does not contain '{key}'.")
 
     train_loss = checkpoint["train_loss"]
     val_loss = checkpoint["val_loss"]
+
+    train_acc = checkpoint["train_acc"]
+    val_acc = checkpoint["val_acc"]
 
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Plot
-    plt.figure(figsize=(8, 6))
-
     epochs = range(1, len(train_loss) + 1)
 
-    plt.plot(
+    # Create figure and two y axes
+    fig, ax1 = plt.subplots(figsize=(8, 6))
+
+    # Loss axis
+    loss_train_line, = ax1.plot(
         epochs,
         train_loss,
         linewidth=2,
         label="Training Loss",
     )
 
+    loss_val_line = None
     if val_loss is not None:
-        plt.plot(
+        loss_val_line, = ax1.plot(
             epochs,
             val_loss,
             linewidth=2,
             label="Validation Loss",
         )
 
-        best_epoch = torch.argmin(val_loss).item() + 1
+        best_epoch = torch.argmin(torch.tensor(val_loss)).item() + 1
         best_loss = min(val_loss)
 
-        plt.scatter(
+        ax1.scatter(
             best_epoch,
             best_loss,
             s=60,
@@ -53,16 +66,55 @@ def main(args):
         print(f"Best validation loss : {best_loss:.6f}")
         print(f"Best epoch           : {best_epoch}")
 
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training History")
-    plt.grid(True)
-    plt.legend()
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.grid(True)
 
+    # Accuracy axis
+    ax2 = ax1.twinx()
+
+    acc_train_line, = ax2.plot(
+        epochs,
+        train_acc,
+        linestyle="--",
+        linewidth=2,
+        label="Training Accuracy",
+    )
+
+    acc_val_line, = ax2.plot(
+        epochs,
+        val_acc,
+        linestyle="--",
+        linewidth=2,
+        label="Validation Accuracy",
+    )
+
+    ax2.set_ylabel("Accuracy")
+    ax2.set_ylim(0, 1)
+
+    # Combine legends from both axes
+    lines = [
+        loss_train_line,
+        loss_val_line,
+        acc_train_line,
+        acc_val_line,
+    ]
+
+    lines = [line for line in lines if line is not None]
+
+    labels = [line.get_label() for line in lines]
+
+    ax1.legend(
+        lines,
+        labels,
+        loc="center right",
+    )
+
+    plt.title("Training History")
     plt.tight_layout()
 
-    png_file = output_dir / "loss.png"
-    pdf_file = output_dir / "loss.pdf"
+    png_file = output_dir / "training_history.png"
+    pdf_file = output_dir / "training_history.pdf"
 
     plt.savefig(png_file, dpi=300)
     plt.savefig(pdf_file)
@@ -78,7 +130,7 @@ if __name__ == "__main__":
         "--loss-checkpoint",
         type=Path,
         default=Path("checkpoints/test_model_losses.pt"),
-        help="Training and validation losses",
+        help="Training history checkpoint",
     )
 
     parser.add_argument(

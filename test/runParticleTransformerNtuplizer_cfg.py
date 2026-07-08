@@ -15,7 +15,7 @@ options.register(
 options.register(
     'outputRootFile',
     'rootfiles_particleTransformer/WbWb_4000_1000.root', # to test ntuplizer
-    # 'rootfiles_particleTransformer/WbWb_all.root', # for realsies
+    #'rootfiles_particleTransformer/WbWb_all.root', # for realsies
     VarParsing.multiplicity.singleton,
     VarParsing.varType.string,
     'Output ROOT file'

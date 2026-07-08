@@ -263,29 +263,18 @@ def process_events(arrays):
     # Extract particle-level branches, ordering by pt
     ##########################################################
 
-    pt     = arrays["particle_pt"]
-    eta    = arrays["particle_eta"]
-    phi    = arrays["particle_phi"]
-    energy = arrays["particle_energy"]
+    order = ak.argsort(arrays["particle_pt"], ascending=False)
 
-    charge = arrays["particle_charge"]
-    pdgid  = arrays["particle_pdgId"]
+    pt     = arrays["particle_pt"][order]
+    eta    = arrays["particle_eta"][order]
+    phi    = arrays["particle_phi"][order]
+    energy = arrays["particle_energy"][order]
 
-    dxy    = arrays["particle_dxy"]
-    dz     = arrays["particle_dz"]
+    charge = arrays["particle_charge"][order]
+    pdgid  = arrays["particle_pdgId"][order]
 
-    for i in range(len(pt)):
-        order     = np.argsort(np.asarray(pt[i]))[::-1]
-        pt[i]     = pt[i][order]
-        eta[i]    = eta[i][order]
-        phi[i]    = phi[i][order]
-        energy[i] = energy[i][order]
-
-        charge[i] = charge[i][order]
-        pdgid[i]  = pdgid[i][order]
-
-        dxy[i]    = dxy[i][order]
-        dz[i]     = dz[i][order]
+    dxy    = arrays["particle_dxy"][order]
+    dz     = arrays["particle_dz"][order]
 
     features = build_features(
         pt,
@@ -403,7 +392,30 @@ def build_targets(arrays):
         axis=1,
     ).astype(np.float32)
 
-    truthLabel = arrays["particle_truthLabel"]
+    # debugging
+    pt = arrays["particle_pt"]
+    truth = arrays["particle_truthLabel"]
+
+    n_pt = ak.num(pt)
+    n_truth = ak.num(truth)
+
+    print("All lengths equal:", np.all(np.asarray(n_pt) == np.asarray(n_truth)))
+
+    bad = np.where(np.asarray(n_pt) != np.asarray(n_truth))[0]
+
+    print("Number of bad events:", len(bad))
+
+    if len(bad):
+        i = bad[0]
+        print(f"Event {i}:")
+        print("  n_pt    =", n_pt[i])
+        print("  n_truth =", n_truth[i])
+        
+    # stop debugging
+
+    order = ak.argsort(arrays["particle_pt"], ascending=False)
+
+    truthLabel = arrays["particle_truthLabel"][order]
 
     truthLabel = ak.where(
         (truthLabel >= 1) & (truthLabel <= 11),
@@ -416,12 +428,6 @@ def build_targets(arrays):
         2,
         truthLabel,
     )
-
-    pt_temp = arrays["particle_pt"]
-
-    for i in range(len(pt_temp)):
-        order = np.argsort(np.asarray(pt_temp[i]))[::-1]
-        truthLabel[i] = truthLabel[i][order]
 
     targets["truthLabel"] = pad_array(truthLabel, pad_value = -2).astype(np.int64)
 

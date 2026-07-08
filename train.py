@@ -724,6 +724,8 @@ def train_one_epoch(
 
     total_loss = 0.0
     total_events = 0
+    total_correct = 0.0
+    total_numParticles = 0.0
 
     for batch in loader:
 
@@ -758,6 +760,17 @@ def train_one_epoch(
             logits.reshape(-1, NUM_CLASSES),
             labels.reshape(-1),
         )
+        
+        # Total accuracy
+        preds = torch.argmax(logits, dim=-1)
+
+        mask = labels != -1
+
+        correct = (preds == labels) & mask
+
+        total_correct += correct.sum().float()
+        
+        total_numParticles += mask.sum().float()
 
         # Backpropagation
         optimizer.zero_grad()
@@ -773,7 +786,7 @@ def train_one_epoch(
 
         total_events += batch_size
 
-    return total_loss / total_events
+    return (total_loss / total_events, total_correct / total_numParticles) 
 
 def validate(
     model,
@@ -789,6 +802,8 @@ def validate(
 
     total_loss = 0.0
     total_events = 0
+    total_correct = 0.0
+    total_numParticles = 0.0
 
     with torch.no_grad():
 
@@ -820,13 +835,24 @@ def validate(
                 labels.reshape(-1),
             )
 
+            # Total accuracy
+            preds = torch.argmax(logits, dim=-1)
+
+            mask = labels != -1
+
+            correct = (preds == labels) & mask
+
+            total_correct += correct.sum().float()
+            
+            total_numParticles += mask.sum().float()
+
             batch_size = particles.shape[0]
 
             total_loss += loss.item() * batch_size
 
             total_events += batch_size
 
-    return total_loss / total_events
+    return (total_loss / total_events, total_correct / total_numParticles)
 
 ###########################################################################
 # Main training function
@@ -894,9 +920,11 @@ def train(
     best_val_loss = float("inf")
     train_losses = torch.zeros(epochs)
     val_losses = torch.zeros(epochs)
+    train_accs = torch.zeros(epochs)
+    val_accs = torch.zeros(epochs)
 
     for epoch in range(epochs):
-        train_loss = train_one_epoch(
+        train_loss, train_acc = train_one_epoch(
             model,
             train_loader,
             optimizer,
@@ -904,7 +932,7 @@ def train(
             device,
         )
 
-        val_loss = validate(
+        val_loss, val_acc = validate(
             model,
             val_loader,
             criterion,
@@ -914,11 +942,15 @@ def train(
         print(
             f"Epoch {epoch+1}/{epochs} "
             f"| train loss = {train_loss:.5f} "
-            f"| val loss = {val_loss:.5f}"
+            f"| val loss = {val_loss:.5f} "
+            f"| train accuracy = {train_acc:.5f} "
+            f"| val accuracy = {val_acc:.5f} "
         )
 
         train_losses[epoch] = train_loss
         val_losses[epoch] = val_loss
+        train_accs[epoch] = train_acc
+        val_accs[epoch] = val_acc
 
         # Save best checkpoint
         if val_loss < best_val_loss:
@@ -940,6 +972,8 @@ def train(
             "epoch": torch.arange(1, epochs+1),
             "train_loss": train_losses,
             "val_loss": val_losses,
+            "train_acc": train_accs,
+            "val_acc": val_accs,
         },
         "checkpoints/" + output_path + "_losses.pt"
     )
