@@ -765,7 +765,6 @@ def train_one_epoch(
 
         # Compute loss
         # logits: (B,N,NUM_CLASSES)
-        # labels: (B,N)
 
         loss = criterion(
             logits.reshape(-1, NUM_CLASSES),

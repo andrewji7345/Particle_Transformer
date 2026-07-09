@@ -448,6 +448,8 @@ void ParticleTransformerNtuplizer::beginJob(){
   tree_->Branch("particle_ak4Index", &particle_ak4Index);
   tree_->Branch("particle_ak8Index", &particle_ak8Index);
 
+  // TODO: add distance to nearest AK4/AK8 jet (even if it is already clustered into a jet)
+
   // AK8 jets
   tree_->Branch("ak8_pt",   &ak8_pt);
   tree_->Branch("ak8_eta",  &ak8_eta);
