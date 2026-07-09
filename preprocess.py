@@ -408,7 +408,13 @@ def build_targets(arrays):
         truthLabel,
     )
 
-    targets["truthLabel"] = pad_array(truthLabel, pad_value = -2).astype(np.int64)
+    truthLabel = ak.where(
+        (truthLabel < 1) | (truthLabel > 22),
+        0,
+        truthLabel,
+    )
+
+    targets["truthLabel"] = pad_array(truthLabel, pad_value = -1).astype(np.int64)
 
     return targets
 

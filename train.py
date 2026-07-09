@@ -43,7 +43,7 @@ MLP_RATIO = 4
 DROPOUT = 0.1
 
 INTERACTION_DIM = 16
-NUM_CLASSES = 4
+NUM_CLASSES = 3
 
 ###########################################################################
 # Particle embedding
