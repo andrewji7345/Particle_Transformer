@@ -119,60 +119,73 @@ void branchParticle(TTree* tree,
 //--------------------------------------------------
 
 int getTruthLabel(const reco::Candidate* p,
-                    const reco::Candidate* gen_chi_ptr[2],
+                  const reco::Candidate* gen_chi_ptr[2],
 
-                    const reco::Candidate* gen_W_q0_ptr[2],
-                    const reco::Candidate* gen_W_q1_ptr[2],
-                    const reco::Candidate* gen_b_ptr[2],
-                    const reco::Candidate* gen_Z_q0_ptr[2],
-                    const reco::Candidate* gen_Z_q1_ptr[2],
-                    const reco::Candidate* gen_h_q0_ptr[2],
-                    const reco::Candidate* gen_h_q1_ptr[2],
-                    const reco::Candidate* gen_t_W_q0_ptr[2],
-                    const reco::Candidate* gen_t_W_q1_ptr[2],
-                    const reco::Candidate* gen_t_b_ptr[2])
-  {
-  if (!p)
-      return -1;
+                  const reco::Candidate* gen_W_q0_ptr[2],
+                  const reco::Candidate* gen_W_q1_ptr[2],
+                  const reco::Candidate* gen_b_ptr[2],
+                  const reco::Candidate* gen_Z_q0_ptr[2],
+                  const reco::Candidate* gen_Z_q1_ptr[2],
+                  const reco::Candidate* gen_h_q0_ptr[2],
+                  const reco::Candidate* gen_h_q1_ptr[2],
+                  const reco::Candidate* gen_t_W_q0_ptr[2],
+                  const reco::Candidate* gen_t_W_q1_ptr[2],
+                  const reco::Candidate* gen_t_b_ptr[2])
+{
+    if (!p)
+        return -1;
 
-  // Check both chi decay chains
-  for (int i = 0; i < 2; ++i) {
+    // Check both chi decay chains
+    for (int i = 0; i < 2; ++i) {
 
-      int offset = 11 * i;
+        int offset = 11 * i;
 
-      if (p == gen_W_q0_ptr[i])   return offset + 1;
-      if (p == gen_W_q1_ptr[i])   return offset + 2;
-      if (p == gen_b_ptr[i])      return offset + 3;
-      if (p == gen_Z_q0_ptr[i])   return offset + 4;
-      if (p == gen_Z_q1_ptr[i])   return offset + 5;
-      if (p == gen_h_q0_ptr[i])   return offset + 6;
-      if (p == gen_h_q1_ptr[i])   return offset + 7;
-      if (p == gen_t_W_q0_ptr[i]) return offset + 8;
-      if (p == gen_t_W_q1_ptr[i]) return offset + 9;
-      if (p == gen_t_b_ptr[i])    return offset + 10;
-      if (p == gen_chi_ptr[i])    return offset + 11; // FSR
+        if (p == gen_W_q0_ptr[i])   return offset + 1;
+        if (p == gen_W_q1_ptr[i])   return offset + 2;
+        if (p == gen_b_ptr[i])      return offset + 3;
+        if (p == gen_Z_q0_ptr[i])   return offset + 4;
+        if (p == gen_Z_q1_ptr[i])   return offset + 5;
+        if (p == gen_h_q0_ptr[i])   return offset + 6;
+        if (p == gen_h_q1_ptr[i])   return offset + 7;
+        if (p == gen_t_W_q0_ptr[i]) return offset + 8;
+        if (p == gen_t_W_q1_ptr[i]) return offset + 9;
+        if (p == gen_t_b_ptr[i])    return offset + 10;
+        if (p == gen_chi_ptr[i])    return offset + 11; // FSR
 
-  }
+    }
 
-  // Reached beam / no more ancestry
-  if (p->numberOfMothers() == 0)
-      return 0;
+    // Reached beam / no more ancestry
+    if (p->numberOfMothers() == 0)
+        return 0;
 
-  // Recurse
-  return getTruthLabel(p->mother(),
-                      gen_chi_ptr,
+    // Recursively search all mothers
+    for (size_t i = 0; i < p->numberOfMothers(); ++i) {
 
-                      gen_W_q0_ptr,
-                      gen_W_q1_ptr,
-                      gen_b_ptr,
-                      gen_Z_q0_ptr,
-                      gen_Z_q1_ptr,
-                      gen_h_q0_ptr,
-                      gen_h_q1_ptr,
-                      gen_t_W_q0_ptr,
-                      gen_t_W_q1_ptr,
-                      gen_t_b_ptr);
-  }
+        int label = getTruthLabel(
+            p->mother(i),
+
+            gen_chi_ptr,
+
+            gen_W_q0_ptr,
+            gen_W_q1_ptr,
+            gen_b_ptr,
+            gen_Z_q0_ptr,
+            gen_Z_q1_ptr,
+            gen_h_q0_ptr,
+            gen_h_q1_ptr,
+            gen_t_W_q0_ptr,
+            gen_t_W_q1_ptr,
+            gen_t_b_ptr
+        );
+
+        // Found a valid ancestry match
+        if (label != 0)
+            return label;
+    }
+
+    // No ancestry path matched any target particle
+    return 0;
+}
 
 //--------------------------------------------------
 // Helper function: calculate delta phi
@@ -1022,7 +1035,6 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     } else {
       particle_match_pdgid.push_back(0); // unmatched
       particle_match_dr2.push_back(-1.);
-      continue;
     }
 
     // recursively find ancestry
@@ -1048,6 +1060,10 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
   } // end loop over pf cands
   
   // Fill tree
+  assert(particle_pt.size() == particle_truthLabel.size());
+  assert(particle_pt.size() == particle_eta.size());
+  assert(particle_pt.size() == particle_phi.size());
+  assert(particle_pt.size() == particle_energy.size());
   tree_->Fill();
   
 } // end analyze()

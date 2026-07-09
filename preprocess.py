@@ -392,27 +392,6 @@ def build_targets(arrays):
         axis=1,
     ).astype(np.float32)
 
-    # debugging
-    pt = arrays["particle_pt"]
-    truth = arrays["particle_truthLabel"]
-
-    n_pt = ak.num(pt)
-    n_truth = ak.num(truth)
-
-    print("All lengths equal:", np.all(np.asarray(n_pt) == np.asarray(n_truth)))
-
-    bad = np.where(np.asarray(n_pt) != np.asarray(n_truth))[0]
-
-    print("Number of bad events:", len(bad))
-
-    if len(bad):
-        i = bad[0]
-        print(f"Event {i}:")
-        print("  n_pt    =", n_pt[i])
-        print("  n_truth =", n_truth[i])
-        
-    # stop debugging
-
     order = ak.argsort(arrays["particle_pt"], ascending=False)
 
     truthLabel = arrays["particle_truthLabel"][order]
