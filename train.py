@@ -697,6 +697,17 @@ def load_particle_datasets(dataset_name, pt_dir="ptfiles"):
     merged["val_idx"] = torch.cat(val_idx)
     merged["test_idx"] = torch.cat(test_idx)
 
+    # start debugging
+    train_labels = merged["truthLabel"][merged["train_idx"]]
+    val_labels   = merged["truthLabel"][merged["val_idx"]]
+    test_labels  = merged["truthLabel"][merged["test_idx"]]
+
+    unique, counts = torch.unique(train_labels, return_counts=True)
+
+    for u, c in zip(unique.tolist(), counts.tolist()):
+        print(f"{u}: {c}")
+    # end debugging
+
     train_dataset = ParticleTransformerDataset(merged, merged["train_idx"])
     val_dataset = ParticleTransformerDataset(merged, merged["val_idx"])
     test_dataset = ParticleTransformerDataset(merged, merged["test_idx"])
@@ -906,6 +917,8 @@ def train(
 
     model = model.to(device)
 
+    print("Finished loading model")
+
     # Loss, ignoring pad
     criterion = nn.CrossEntropyLoss(ignore_index=-2)
 
@@ -1010,7 +1023,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--epochs",
         type=int,
-        default=10,
+        default=5,
         help="Number of training epochs",
     )
 

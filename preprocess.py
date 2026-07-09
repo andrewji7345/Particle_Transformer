@@ -392,6 +392,11 @@ def build_targets(arrays):
         axis=1,
     ).astype(np.float32)
 
+    # start debugging
+    truthLabel = arrays["particle_truthLabel"]
+    print(ak.unique(ak.flatten(truthLabel)))
+    # end debugging
+
     order = ak.argsort(arrays["particle_pt"], ascending=False)
 
     truthLabel = arrays["particle_truthLabel"][order]

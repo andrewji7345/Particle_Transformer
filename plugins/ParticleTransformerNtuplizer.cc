@@ -821,8 +821,8 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
       }
 
       else {
-        gen_chi_ptr[0] = tmp_gen_chi_ptr_0;
-        gen_chi_ptr[1] = tmp_gen_chi_ptr_1;
+        gen_chi_ptr[1] = tmp_gen_chi_ptr_0;
+        gen_chi_ptr[0] = tmp_gen_chi_ptr_1;
       }  
       
       fillParticle(gen_chi_ptr[0], gen_chi[0]);
@@ -988,6 +988,11 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     genGrid[c].push_back(&gen);
   }
 
+  // Start debugging
+  int matched = 0;
+  int unmatched = 0;
+  // End debugging
+
   // Loop over PF cands, search nearby bins
   for (size_t ipf = 0; ipf < packedPFCands->size(); ++ipf) {
 
@@ -1028,6 +1033,43 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
       }
     }
 
+    // start debugging
+    if (bestGen) {
+      std::cout << "Matched particle:\n";
+
+      const reco::Candidate *q = bestGen;
+
+      while (q) {
+
+          std::cout
+              << "pdgId = "
+              << q->pdgId()
+              << "  status = "
+              << dynamic_cast<const reco::GenParticle*>(q)->status()
+              << "  ptr = "
+              << q
+              << std::endl;
+
+          if (q->numberOfMothers() == 0)
+              break;
+
+          q = q->mother(0);
+      }
+
+      std::cout << "Stored pointers\n";
+
+      std::cout << gen_W_q0_ptr[0] << std::endl;
+      std::cout << gen_W_q1_ptr[0] << std::endl;
+      std::cout << gen_b_ptr[0] << std::endl;
+      std::cout << gen_chi_ptr[0] << std::endl;
+    }
+
+    if (bestGen)
+      matched++;
+    else
+      unmatched++;
+    // end debugging
+
     // store result
     if (bestGen) {
       particle_match_pdgid.push_back(bestGen->pdgId());
@@ -1058,6 +1100,15 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     }
 
   } // end loop over pf cands
+
+  // Start debugging
+  std::cout
+    << "Matched "
+    << matched
+    << " unmatched "
+    << unmatched
+    << std::endl;
+  // End debugging
   
   // Fill tree
   assert(particle_pt.size() == particle_truthLabel.size());
