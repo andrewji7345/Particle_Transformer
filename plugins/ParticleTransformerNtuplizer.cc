@@ -1054,7 +1054,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
                                                   gen_t_b_ptr));
     }
     else {
-      particle_truthLabel.push_back(-1);
+      particle_truthLabel.push_back(0);
     }
 
   } // end loop over pf cands
