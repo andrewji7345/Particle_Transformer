@@ -3,7 +3,10 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <set>
 #include <cmath>
+#include <string>
+#include <iostream>
 
 // Framework
 #include "FWCore/Framework/interface/Frameworkfwd.h"
@@ -118,53 +121,62 @@ void branchParticle(TTree* tree,
 // Helper function: recursively find the truth label for a genParticle's origin
 //--------------------------------------------------
 
-int getTruthLabel(const reco::Candidate* p,
-                  const reco::Candidate* gen_chi_ptr[2],
+std::set<int> getTruthLabel(const reco::Candidate* p,
 
-                  const reco::Candidate* gen_W_q0_ptr[2],
-                  const reco::Candidate* gen_W_q1_ptr[2],
-                  const reco::Candidate* gen_b_ptr[2],
-                  const reco::Candidate* gen_Z_q0_ptr[2],
-                  const reco::Candidate* gen_Z_q1_ptr[2],
-                  const reco::Candidate* gen_h_q0_ptr[2],
-                  const reco::Candidate* gen_h_q1_ptr[2],
-                  const reco::Candidate* gen_t_W_q0_ptr[2],
-                  const reco::Candidate* gen_t_W_q1_ptr[2],
-                  const reco::Candidate* gen_t_b_ptr[2])
+                              const reco::Candidate* gen_W_q0_ptr[2],
+                              const reco::Candidate* gen_W_q1_ptr[2],
+                              const reco::Candidate* gen_b_ptr[2],
+                              const reco::Candidate* gen_Z_q0_ptr[2],
+                              const reco::Candidate* gen_Z_q1_ptr[2],
+                              const reco::Candidate* gen_h_q0_ptr[2],
+                              const reco::Candidate* gen_h_q1_ptr[2],
+                              const reco::Candidate* gen_t_W_q0_ptr[2],
+                              const reco::Candidate* gen_t_W_q1_ptr[2],
+                              const reco::Candidate* gen_t_b_ptr[2])
 {
-    if (!p)
-        return -1;
+    std::set<int> labels;
+
+    // If no pointer, return empty
+    if (!p) {
+        return labels;
+    }
 
     // Check both chi decay chains
     for (int i = 0; i < 2; ++i) {
 
-        int offset = 11 * i;
+        int offset = 10 * i;
 
-        if (p == gen_W_q0_ptr[i])   return offset + 1;
-        if (p == gen_W_q1_ptr[i])   return offset + 2;
-        if (p == gen_b_ptr[i])      return offset + 3;
-        if (p == gen_Z_q0_ptr[i])   return offset + 4;
-        if (p == gen_Z_q1_ptr[i])   return offset + 5;
-        if (p == gen_h_q0_ptr[i])   return offset + 6;
-        if (p == gen_h_q1_ptr[i])   return offset + 7;
-        if (p == gen_t_W_q0_ptr[i]) return offset + 8;
-        if (p == gen_t_W_q1_ptr[i]) return offset + 9;
-        if (p == gen_t_b_ptr[i])    return offset + 10;
-        if (p == gen_chi_ptr[i])    return offset + 11; // FSR
+        if (p == gen_W_q0_ptr[i])   {labels.insert(offset + 1);}
+        if (p == gen_W_q1_ptr[i])   {labels.insert(offset + 2);}
+        if (p == gen_b_ptr[i])      {labels.insert(offset + 3);}
+        if (p == gen_Z_q0_ptr[i])   {labels.insert(offset + 4);}
+        if (p == gen_Z_q1_ptr[i])   {labels.insert(offset + 5);}
+        if (p == gen_h_q0_ptr[i])   {labels.insert(offset + 6);}
+        if (p == gen_h_q1_ptr[i])   {labels.insert(offset + 7);}
+        if (p == gen_t_W_q0_ptr[i]) {labels.insert(offset + 8);}
+        if (p == gen_t_W_q1_ptr[i]) {labels.insert(offset + 9);}
+        if (p == gen_t_b_ptr[i])    {labels.insert(offset + 10);}
 
+        // Check last copies
+        const reco::Candidate* p_lastcopy = findLastCopy(p);
+        
+        if (p_lastcopy == gen_W_q0_ptr[i])   {labels.insert(offset + 1);}
+        if (p_lastcopy == gen_W_q1_ptr[i])   {labels.insert(offset + 2);}
+        if (p_lastcopy == gen_b_ptr[i])      {labels.insert(offset + 3);}
+        if (p_lastcopy == gen_Z_q0_ptr[i])   {labels.insert(offset + 4);}
+        if (p_lastcopy == gen_Z_q1_ptr[i])   {labels.insert(offset + 5);}
+        if (p_lastcopy == gen_h_q0_ptr[i])   {labels.insert(offset + 6);}
+        if (p_lastcopy == gen_h_q1_ptr[i])   {labels.insert(offset + 7);}
+        if (p_lastcopy == gen_t_W_q0_ptr[i]) {labels.insert(offset + 8);}
+        if (p_lastcopy == gen_t_W_q1_ptr[i]) {labels.insert(offset + 9);}
+        if (p_lastcopy == gen_t_b_ptr[i])    {labels.insert(offset + 10);}
     }
-
-    // Reached beam / no more ancestry
-    if (p->numberOfMothers() == 0)
-        return 0;
 
     // Recursively search all mothers
     for (size_t i = 0; i < p->numberOfMothers(); ++i) {
 
-        int label = getTruthLabel(
+        std::set<int> mother_labels = getTruthLabel(
             p->mother(i),
-
-            gen_chi_ptr,
 
             gen_W_q0_ptr,
             gen_W_q1_ptr,
@@ -178,13 +190,12 @@ int getTruthLabel(const reco::Candidate* p,
             gen_t_b_ptr
         );
 
-        // Found a valid ancestry match
-        if (label != 0)
-            return label;
+        for (int mother_label : mother_labels) {
+          labels.insert(mother_label);
+        }
     }
 
-    // No ancestry path matched any target particle
-    return 0;
+    return labels;
 }
 
 //--------------------------------------------------
@@ -246,6 +257,10 @@ class ParticleTransformerNtuplizer: public edm::one::EDAnalyzer<edm::one::Shared
   private:
     void beginJob() override;
     void analyze(const edm::Event&, const edm::EventSetup&) override;
+    void printEventDebug();
+    void printMotherChain(const reco::Candidate* p);
+    void printAncestryGraph(const reco::Candidate* p,const reco::Candidate* b0,const reco::Candidate* b1,int depth = 0,std::set<const reco::Candidate*>* visited = nullptr);
+    
 
   //------------------------------------
   // Tokens
@@ -350,7 +365,7 @@ class ParticleTransformerNtuplizer: public edm::one::EDAnalyzer<edm::one::Shared
 
   std::vector<int> particle_match_pdgid;
   std::vector<float> particle_match_dr2;
-  std::vector<int> particle_truthLabel;
+  std::vector<std::vector<int>> particle_truthLabel;
 };
 
 //------------------------------------
@@ -388,6 +403,164 @@ ParticleTransformerNtuplizer::ParticleTransformerNtuplizer(
         iConfig.getParameter<edm::InputTag>("genAK8Jets"));
 
     isMC = iConfig.getParameter<bool>("isMC");
+}
+
+//------------------------------------
+// printEventDebug
+//------------------------------------
+
+void ParticleTransformerNtuplizer::printEventDebug() {
+
+  std::cout << "\n================ EVENT DEBUG ================\n";
+
+  // Event info
+  std::cout << "Run/Lumi/Event: "
+            << run << " / "
+            << lumi << " / "
+            << event << "\n";
+
+  std::cout << "isMC: " << isMC << "\n";
+  std::cout << "HT: " << HT
+            << " MET_pt: " << MET_pt
+            << " MET_phi: " << MET_phi
+            << " rho: " << rho << "\n";
+
+  std::cout << "nPV: " << nPV
+            << " PV: ("
+            << PV_x << ", "
+            << PV_y << ", "
+            << PV_z << ")\n";
+
+  std::cout << "nParticles: " << nParticles << "\n";
+
+
+  // PF particles
+  std::cout << "\n---------- PF PARTICLES ----------\n";
+
+  for (unsigned int i = 0; i < particle_pt.size(); i++) {
+
+    std::cout << "Particle " << i << ": "
+              << "pt=" << particle_pt[i]
+              << " eta=" << particle_eta[i]
+              << " phi=" << particle_phi[i]
+              << " E=" << particle_energy[i]
+              << " m=" << particle_mass[i]
+              << " px=" << particle_px[i]
+              << " py=" << particle_py[i]
+              << " pz=" << particle_pz[i]
+              << "\n";
+
+    std::cout << "  charge=" << particle_charge[i]
+              << " pdgId=" << particle_pdgId[i]
+              << " dz=" << particle_dz[i]
+              << " dxy=" << particle_dxy[i]
+              << "\n";
+
+    std::cout << "  puppiWeight=" << particle_puppiWeight[i]
+              << " fromPV=" << particle_fromPV[i]
+              << " pvQuality=" << particle_pvAssociationQuality[i]
+              << "\n";
+
+    std::cout << "  vertex=("
+              << particle_vx[i] << ", "
+              << particle_vy[i] << ", "
+              << particle_vz[i] << ")"
+              << " ak4Index=" << particle_ak4Index[i]
+              << " ak8Index=" << particle_ak8Index[i]
+              << "\n";
+
+    std::cout << "  matchPDG=" << particle_match_pdgid[i]
+              << " matchDR2=" << particle_match_dr2[i]
+              << " truthLabels=";
+
+    for (auto label : particle_truthLabel[i])
+      std::cout << label << " ";
+
+    std::cout << "\n";
+  }
+
+
+  // AK8 jets
+  std::cout << "\n---------- AK8 JETS ----------\n";
+
+  for (unsigned int i = 0; i < ak8_pt.size(); i++) {
+
+    std::cout << "AK8 Jet " << i
+              << ": pt=" << ak8_pt[i]
+              << " eta=" << ak8_eta[i]
+              << " phi=" << ak8_phi[i]
+              << " mass=" << ak8_mass[i]
+              << "\n";
+
+    std::cout << "  softdropMass="
+              << ak8_softdropMass[i]
+              << " tau1=" << ak8_tau1[i]
+              << " tau2=" << ak8_tau2[i]
+              << " tau3=" << ak8_tau3[i]
+              << " tau4=" << ak8_tau4[i]
+              << "\n";
+  }
+
+
+  // AK4 jets
+  std::cout << "\n---------- AK4 JETS ----------\n";
+
+  for (unsigned int i = 0; i < ak4_pt.size(); i++) {
+
+    std::cout << "AK4 Jet " << i
+              << ": pt=" << ak4_pt[i]
+              << " eta=" << ak4_eta[i]
+              << " phi=" << ak4_phi[i]
+              << " mass=" << ak4_mass[i]
+              << " area=" << ak4_jetArea[i]
+              << "\n";
+  }
+
+
+  // Generator truth
+  auto printKin = [](const std::string& name,
+                     const ParticleKinematics& p) {
+
+    std::cout << name
+              << ": pt=" << p.pt
+              << " eta=" << p.eta
+              << " phi=" << p.phi
+              << " mass=" << p.mass
+              << "\n";
+  };
+
+
+  std::cout << "\n---------- GEN TRUTH ----------\n";
+
+  printKin("Suu", gen_Suu);
+
+  for (int i = 0; i < 2; i++) {
+
+    std::cout << "\nDecay chain " << i << "\n";
+
+    printKin("chi", gen_chi[i]);
+
+    printKin("W", gen_W[i]);
+    printKin("W_q0", gen_W_q0[i]);
+    printKin("W_q1", gen_W_q1[i]);
+    printKin("b", gen_b[i]);
+
+    printKin("Z", gen_Z[i]);
+    printKin("Z_q0", gen_Z_q0[i]);
+    printKin("Z_q1", gen_Z_q1[i]);
+
+    printKin("h", gen_h[i]);
+    printKin("h_q0", gen_h_q0[i]);
+    printKin("h_q1", gen_h_q1[i]);
+
+    printKin("t", gen_t[i]);
+    printKin("t_W", gen_t_W[i]);
+    printKin("t_W_q0", gen_t_W_q0[i]);
+    printKin("t_W_q1", gen_t_W_q1[i]);
+    printKin("t_b", gen_t_b[i]);
+  }
+
+  std::cout << "==============================================\n\n";
 }
 
 //------------------------------------
@@ -810,7 +983,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
         continue;
       }
 
-      if (std::abs(gen_Suu_ptr->daughter(0)->pdgId()) != 9936661 || std::abs(gen_Suu_ptr->daughter(1)->pdgId()) != 9936661) {
+      if (std::abs(gen_Suu_ptr->daughter(0)->pdgId()) != 9936662 || std::abs(gen_Suu_ptr->daughter(1)->pdgId()) != 9936662) { // The chi pdgID
         continue;
       }
 
@@ -990,11 +1163,6 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     genGrid[c].push_back(&gen);
   }
 
-  // Start debugging
-  int matched = 0;
-  int unmatched = 0;
-  // End debugging
-
   // Loop over PF cands, search nearby bins
   for (size_t ipf = 0; ipf < packedPFCands->size(); ++ipf) {
 
@@ -1035,43 +1203,6 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
       }
     }
 
-    // start debugging
-    if (bestGen) {
-      std::cout << "Matched particle:\n";
-
-      const reco::Candidate *q = bestGen;
-
-      while (q) {
-
-          std::cout
-              << "pdgId = "
-              << q->pdgId()
-              << "  status = "
-              << dynamic_cast<const reco::GenParticle*>(q)->status()
-              << "  ptr = "
-              << q
-              << std::endl;
-
-          if (q->numberOfMothers() == 0)
-              break;
-
-          q = q->mother(0);
-      }
-
-      std::cout << "Stored pointers\n";
-
-      std::cout << gen_W_q0_ptr[0] << std::endl;
-      std::cout << gen_W_q1_ptr[0] << std::endl;
-      std::cout << gen_b_ptr[0] << std::endl;
-      std::cout << gen_chi_ptr[0] << std::endl;
-    }
-
-    if (bestGen)
-      matched++;
-    else
-      unmatched++;
-    // end debugging
-
     // store result
     if (bestGen) {
       particle_match_pdgid.push_back(bestGen->pdgId());
@@ -1082,43 +1213,45 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     }
 
     // recursively find ancestry
-    if (bestGen) {
-      particle_truthLabel.push_back(getTruthLabel(bestGen,
-                                                  gen_chi_ptr,
+    std::vector<int> truthLabel_vec;
+    std::set<int> truthLabel_set;
 
-                                                  gen_W_q0_ptr, 
-                                                  gen_W_q1_ptr, 
-                                                  gen_b_ptr,
-                                                  gen_Z_q0_ptr, 
-                                                  gen_Z_q1_ptr,
-                                                  gen_h_q0_ptr, 
-                                                  gen_h_q1_ptr,
-                                                  gen_t_W_q0_ptr, 
-                                                  gen_t_W_q1_ptr, 
-                                                  gen_t_b_ptr));
+    if (bestGen) {
+      truthLabel_set = getTruthLabel(bestGen,
+
+                                    gen_W_q0_ptr, 
+                                    gen_W_q1_ptr, 
+                                    gen_b_ptr,
+                                    gen_Z_q0_ptr, 
+                                    gen_Z_q1_ptr,
+                                    gen_h_q0_ptr, 
+                                    gen_h_q1_ptr,
+                                    gen_t_W_q0_ptr, 
+                                    gen_t_W_q1_ptr, 
+                                    gen_t_b_ptr);
+      
+      for (int truthLabel: truthLabel_set) {
+        truthLabel_vec.push_back(truthLabel);
+      }
+      if (truthLabel_vec.size() == 0) {
+        truthLabel_vec.push_back(0);
+      }
     }
     else {
-      particle_truthLabel.push_back(0);
+      truthLabel_vec.push_back(0);
     }
+
+    particle_truthLabel.push_back(truthLabel_vec);
 
   } // end loop over pf cands
 
-  // Start debugging
-  std::cout
-    << "Matched "
-    << matched
-    << " unmatched "
-    << unmatched
-    << std::endl;
-  // End debugging
-  
   // Fill tree
   assert(particle_pt.size() == particle_truthLabel.size());
   assert(particle_pt.size() == particle_eta.size());
   assert(particle_pt.size() == particle_phi.size());
   assert(particle_pt.size() == particle_energy.size());
   tree_->Fill();
-  
+
 } // end analyze()
 
 //------------------------------------

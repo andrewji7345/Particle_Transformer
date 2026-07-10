@@ -392,35 +392,32 @@ def build_targets(arrays):
         axis=1,
     ).astype(np.float32)
 
-    # start debugging
-    truthLabel = arrays["particle_truthLabel"]
-    print(ak.unique(ak.flatten(truthLabel)))
-    # end debugging
-
     order = ak.argsort(arrays["particle_pt"], ascending=False)
 
     truthLabel = arrays["particle_truthLabel"][order]
 
+    # Identify whether each particle has ancestry from chi0 or chi1
+    has_chi0 = ak.any((truthLabel >= 1) & (truthLabel <= 10), axis=2)
+    has_chi1 = ak.any((truthLabel >= 11) & (truthLabel <= 20), axis=2)
+
+    # Assign:
+    #   1 = chi0 (including mixed ancestry)
+    #   2 = chi1
+    #   0 = neither
     truthLabel = ak.where(
-        (truthLabel >= 1) & (truthLabel <= 11),
+        has_chi0,
         1,
-        truthLabel,
+        ak.where(has_chi1, 2, 0)
     )
 
-    truthLabel = ak.where(
-        (truthLabel >= 12) & (truthLabel <= 22),
-        2,
-        truthLabel,
-    )
+    mixed = has_chi0 & has_chi1
+    n_mixed = ak.sum(mixed)
 
-    truthLabel = ak.where(
-        (truthLabel < 1) | (truthLabel > 22),
-        0,
-        truthLabel,
-    )
+    if n_mixed > 0:
+        print(f"Warning: assigning {n_mixed} mixed-ancestry particles to chi0.")
 
-    targets["truthLabel"] = pad_array(truthLabel, pad_value = -1).astype(np.int64)
-
+    targets["truthLabel"] = pad_array(truthLabel, pad_value=-1).astype(np.int64)
+    
     return targets
 
 def make_splits(n_events, seed=42):
