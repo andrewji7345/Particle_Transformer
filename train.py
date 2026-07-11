@@ -1041,11 +1041,22 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-o",
         "--output",
         type=str,
         default="test_model",
         help="Output checkpoint file",
+    )
+
+    parser.add_argument(
+        "--mode",
+        choices=[
+            "all_pf",
+            "ak8_constituents",
+            "ak4_constituents",
+            "all_constituents",
+        ],
+        default="all_pf",
+        help="Store all_pf, ak8_constituents, ak4_constituents, all_constituents",
     )
 
     args = parser.parse_args()

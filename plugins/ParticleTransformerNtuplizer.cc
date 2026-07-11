@@ -860,7 +860,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     
   }
 
-  // Determine AK8 jet membership for each PF candidate
+  // Determine AK4 jet membership for each PF candidate
 
   std::vector<int> ak4Membership(packedPFCands->size(), -1);
 
@@ -895,7 +895,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
 
   }
 
-  // Determine AK4 jet membership for each PF candidate
+  // Determine AK8 jet membership for each PF candidate
 
   std::vector<int> ak8Membership(packedPFCands->size(), -1);
 

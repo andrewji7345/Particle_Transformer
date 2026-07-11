@@ -27,51 +27,8 @@ import uproot
 
 from sklearn.model_selection import train_test_split
 
-##############################################################
-# Configuration, branch lists
-##############################################################
-
 MAX_PARTICLES = 128
-
 EPS = 1e-6
-
-PARTICLE_BRANCHES = [
-    "particle_pt",
-    "particle_eta",
-    "particle_phi",
-    "particle_energy",
-    "particle_charge",
-    "particle_pdgId",
-    "particle_dxy",
-    "particle_dz",
-    "particle_truthLabel",
-]
-
-GLOBAL_BRANCHES = [
-    "HT",
-    "MET_pt",
-    "MET_phi",
-    "rho",
-    "nPV",
-    "PV_x",
-    "PV_y",
-    "PV_z",
-]
-
-TARGET_BRANCHES = [
-    "gen_Suu_px",
-    "gen_Suu_py",
-    "gen_Suu_pz",
-    "gen_Suu_E",
-    "gen_chi0_px",
-    "gen_chi0_py",
-    "gen_chi0_pz",
-    "gen_chi0_E",
-    "gen_chi1_px",
-    "gen_chi1_py",
-    "gen_chi1_pz",
-    "gen_chi1_E",
-]
 
 ##############################################################
 # Helper functions
@@ -103,7 +60,7 @@ def pad_array(array, pad_value=0.0):
 
     return ak.to_numpy(padded)
 
-def build_mask(pt):
+def build_padding_mask(pt):
     """
     Builds particle mask in case of padding.
 
@@ -116,15 +73,39 @@ def build_mask(pt):
 
     counts = ak.num(pt)
 
-    mask = np.zeros(
+    padding_mask = np.zeros(
         (len(counts), MAX_PARTICLES),
         dtype=np.bool_,
     )
 
     for i, n in enumerate(counts):
-        mask[i, : min(n, MAX_PARTICLES)] = True
+        padding_mask[i, : min(n, MAX_PARTICLES)] = True
 
-    return mask
+    return padding_mask
+
+def build_particle_mask(arrays, mode):
+    """
+    For data arrays, build the particle mask depending on the mode
+
+    Input:
+        ak arrays
+
+    Output:
+        particle_mask:   (Nevents, var)
+    """
+
+    if mode == "all_pf":
+        particle_mask = ak.ones_like(arrays["particle_pt"], dtype=bool)
+    elif mode == "ak4_constituents":
+        particle_mask = arrays["particle_ak4Index"] != -1
+    elif mode == "ak8_constituents":
+        particle_mask = arrays["particle_ak8Index"] != -1
+    elif mode == "all_constituents":
+        particle_mask = ((arrays["particle_ak4Index"] != -1) | (arrays["particle_ak8Index"] != -1))
+    else:
+        raise ValueError("Mode is invalid.")
+
+    return particle_mask
 
 def particle_flags(pdgid):
     """
@@ -226,22 +207,7 @@ def build_features(
 
     return features
 
-def load_root_file(filename, treename="particleTransformerNtuplizer/Events"):
-    """
-    Load ROOT tree and return uproot arrays.
-    """
-
-    file = uproot.open(filename)
-    tree = file[treename]
-
-    arrays = tree.arrays(
-        PARTICLE_BRANCHES + GLOBAL_BRANCHES + TARGET_BRANCHES,
-        library="ak",
-    )
-
-    return arrays
-
-def process_events(arrays):
+def process_events(arrays, mode="all_pf"):
     """
     For data arrays, find the features, mask, raw kinematics, and global features
 
@@ -249,32 +215,35 @@ def process_events(arrays):
         ak arrays
 
     Output:
-        X_particles: (Nevents, MAX_PARTICLES, 13)
-        mask:        (Nevents, MAX_PARTICLES)
-        raw_pt:      raw
-        raw_eta:     raw
-        raw_phi:     raw
-        raw_E:       raw
+        X_particles:     (Nevents, MAX_PARTICLES, 13)
+        padding_mask:    (Nevents, MAX_PARTICLES)
+        raw_pt:          raw
+        raw_eta:         raw
+        raw_phi:         raw
+        raw_E:           raw
         global_features: HT, MET, etc.
     )
     """
 
     ##########################################################
     # Extract particle-level branches, ordering by pt
+    # Depending on mode, mask particles out
     ##########################################################
 
-    order = ak.argsort(arrays["particle_pt"], ascending=False)
+    particle_mask = build_particle_mask(arrays, mode)
+    
+    order = ak.argsort(arrays["particle_pt"][particle_mask], ascending=False)
 
-    pt     = arrays["particle_pt"][order]
-    eta    = arrays["particle_eta"][order]
-    phi    = arrays["particle_phi"][order]
-    energy = arrays["particle_energy"][order]
+    pt     = arrays["particle_pt"][particle_mask][order]
+    eta    = arrays["particle_eta"][particle_mask][order]
+    phi    = arrays["particle_phi"][particle_mask][order]
+    energy = arrays["particle_energy"][particle_mask][order]
 
-    charge = arrays["particle_charge"][order]
-    pdgid  = arrays["particle_pdgId"][order]
+    charge = arrays["particle_charge"][particle_mask][order]
+    pdgid  = arrays["particle_pdgId"][particle_mask][order]
 
-    dxy    = arrays["particle_dxy"][order]
-    dz     = arrays["particle_dz"][order]
+    dxy    = arrays["particle_dxy"][particle_mask][order]
+    dz     = arrays["particle_dz"][particle_mask][order]
 
     features = build_features(
         pt,
@@ -290,10 +259,10 @@ def process_events(arrays):
     X_particles = ak.to_numpy(features).astype(np.float32)
 
     ##########################################################
-    # Build particle mask
+    # Build padding mask
     ##########################################################
 
-    mask = build_mask(pt)
+    padding_mask = build_padding_mask(pt)
 
     ##########################################################
     # Save raw kinematics (used later)
@@ -329,7 +298,7 @@ def process_events(arrays):
 
     return (
         X_particles,
-        mask,
+        padding_mask,
         raw_pt,
         raw_eta,
         raw_phi,
@@ -337,7 +306,7 @@ def process_events(arrays):
         global_features,
     )
 
-def build_targets(arrays):
+def build_targets(arrays, mode="all_pf"):
     """
     Get the generator targets.
 
@@ -392,9 +361,16 @@ def build_targets(arrays):
         axis=1,
     ).astype(np.float32)
 
-    order = ak.argsort(arrays["particle_pt"], ascending=False)
+    ##########################################################
+    # Extract particle-level truth labels, ordering by pt
+    # Depending on mode, throw some particles out
+    ##########################################################
 
-    truthLabel = arrays["particle_truthLabel"][order]
+    particle_mask = build_particle_mask(arrays, mode)
+
+    order = ak.argsort(arrays["particle_pt"][particle_mask], ascending=False)
+
+    truthLabel = arrays["particle_truthLabel"][particle_mask][order]
 
     # Identify whether each particle has ancestry from chi0 or chi1
     has_chi0 = ak.any((truthLabel >= 1) & (truthLabel <= 10), axis=2)
@@ -450,13 +426,6 @@ def make_splits(n_events, seed=42):
 
     return train_idx, val_idx, test_idx
 
-def to_torch(x, dtype=torch.float32):
-    """
-    Convert to torch.
-    """
-
-    return torch.tensor(x, dtype=dtype)
-
 def main(args):
 
     shard_id = 0
@@ -472,16 +441,16 @@ def main(args):
         # Process particles + globals
         (
             X_particles,
-            mask,
+            padding_mask,
             raw_pt,
             raw_eta,
             raw_phi,
             raw_E,
             global_features,
-        ) = process_events(arrays)
+        ) = process_events(arrays, mode = args.mode)
 
         # Build targets
-        targets = build_targets(arrays)
+        targets = build_targets(arrays, mode = args.mode)
 
         # Make train/val/test splits
         n_events = X_particles.shape[0]
@@ -490,7 +459,7 @@ def main(args):
         # Dict of datasets
         dataset_torch = {
             "particles": torch.tensor(X_particles),
-            "mask": torch.tensor(mask, dtype=torch.bool),
+            "mask": torch.tensor(padding_mask, dtype=torch.bool),
 
             "raw_pt": torch.tensor(raw_pt),
             "raw_eta": torch.tensor(raw_eta),
@@ -510,7 +479,7 @@ def main(args):
         }
 
         # Save
-        out_file = args.output.replace(".pt", f"_shard{shard_id:04d}.pt")
+        out_file = args.output.replace(".pt", f"_{args.mode}_shard{shard_id:04d}.pt")
         torch.save(dataset_torch, out_file)
 
         print(f"[INFO] Wrote {out_file} with {n_events} events")
@@ -541,6 +510,18 @@ if __name__ == "__main__":
         type=str,
         default="particleTransformerNtuplizer/Events",
         help="ROOT TTree name",
+    )
+
+    parser.add_argument(
+        "--mode",
+        choices=[
+            "all_pf",
+            "ak8_constituents",
+            "ak4_constituents",
+            "all_constituents",
+        ],
+        default="all_pf",
+        help="Store all_pf, ak8_constituents, ak4_constituents, all_constituents",
     )
 
     args = parser.parse_args()
