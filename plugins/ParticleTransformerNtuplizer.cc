@@ -268,6 +268,10 @@ public:
       return labels_;
   }
 
+  const std::vector<int>& ca8Jet_labels() const {
+      return ca8Jet_labels_;
+  }
+
 private:
 
   // Helper structs
@@ -317,6 +321,8 @@ private:
 
   std::vector<int> labels_;
 
+  std::vector<int> ca8Jet_labels_;
+
   TLorentzVector totalP4_;
 
   TVector3 betaMPP_;
@@ -337,6 +343,7 @@ void oldJetSortingAlgorithm::clear() {
 
     constituents_.clear();
     labels_.clear();
+    ca8Jet_labels_.clear();
 
     totalP4_.SetPxPyPzE(0., 0., 0., 0.);
     betaMPP_.SetXYZ(0., 0., 0.);
@@ -356,6 +363,7 @@ void oldJetSortingAlgorithm::run(
   clear();
 
   labels_.assign(pfcands.size(), 0);
+  ca8Jet_labels_.assign(pfcands.size(), 0);
   constituents_.reserve(pfcands.size());
 
   collectConstituents(pfcands, ak8Jets);
@@ -708,13 +716,17 @@ void oldJetSortingAlgorithm::enforceChiPtOrdering() {
 void oldJetSortingAlgorithm::assignParticleLabels() {
 
   std::fill(labels_.begin(), labels_.end(), 0);
+  std::fill(ca8Jet_labels_.begin(), ca8Jet_labels_.end(), -1);
 
-  for (const auto& jet : ca8Jets_) {
+  for (size_t i = 0; i < ca8Jets_.size(); ++i) {
+
+    const ReclusteredJet& jet = ca8Jets_[i];
 
     for (int pfIndex : jet.pfIndices) {
 
       if (pfIndex >= 0 && pfIndex < static_cast<int>(labels_.size())) {
         labels_[pfIndex] = jet.label;
+        ca8Jet_labels_[pfIndex] = static_cast<int>(i);
       }
 
     }
@@ -789,6 +801,7 @@ class ParticleTransformerNtuplizer: public edm::one::EDAnalyzer<edm::one::Shared
   std::vector<int> particle_ak8Index;
 
   std::vector<int> particle_algorithmLabel;
+  std::vector<int> particle_algorithmCA8Label;
 
   std::vector<float> ak8_pt;
   std::vector<float> ak8_eta;
@@ -954,6 +967,7 @@ void ParticleTransformerNtuplizer::printEventDebug() {
     std::cout << "  matchPDG=" << particle_match_pdgid[i]
               << " matchDR2=" << particle_match_dr2[i]
               << " algorithmLabel=" << particle_algorithmLabel[i]
+              << " algorithmCA8Label=" << particle_algorithmCA8Label[i]
               << " truthLabels=";
 
     for (auto label : particle_truthLabel[i])
@@ -1105,6 +1119,7 @@ void ParticleTransformerNtuplizer::beginJob(){
   tree_->Branch("particle_ak8Index", &particle_ak8Index);
 
   tree_->Branch("particle_algorithmLabel", &particle_algorithmLabel);
+  tree_->Branch("particle_algorithmCA8Label", &particle_algorithmCA8Label);
 
   // TODO: add distance to nearest AK4/AK8 jet (even if it is already clustered into a jet)
 
@@ -1192,6 +1207,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
   particle_ak8Index.clear();
 
   particle_algorithmLabel.clear();
+  particle_algorithmCA8Label.clear();
 
   ak8_pt.clear();
   ak8_eta.clear();
@@ -1296,6 +1312,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
   particle_ak8Index.reserve(packedPFCands->size());
 
   particle_algorithmLabel.reserve(packedPFCands->size());
+  particle_algorithmCA8Label.reserve(packedPFCands->size());
 
   ak8_pt.reserve(ak8Jets->size());
   ak8_eta.reserve(ak8Jets->size());
@@ -1740,10 +1757,12 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
   alg.run(*packedPFCands, *ak8Jets);
 
   particle_algorithmLabel = alg.labels();
+  particle_algorithmCA8Label = alg.ca8Jet_labels();
 
   // Fill tree
   assert(particle_pt.size() == particle_truthLabel.size());
   assert(particle_pt.size() == particle_algorithmLabel.size());
+  assert(particle_pt.size() == particle_algorithmCA8Label.size());
   assert(particle_pt.size() == particle_eta.size());
   assert(particle_pt.size() == particle_phi.size());
   assert(particle_pt.size() == particle_energy.size());

@@ -45,6 +45,13 @@ DROPOUT = 0.1
 INTERACTION_DIM = 16
 NUM_CLASSES = 3
 
+LAMBDA_MASS = 2.0
+LAMBDA_ANGLE = 2.0
+LAMBDA_ENTROPY = 0.2
+LAMBDA_OCCUPANCY = 0.2
+LAMBDA_SPLIT = 0.1
+LAMBDA_ISR = 0.5
+
 ###########################################################################
 # Particle embedding
 ###########################################################################
@@ -549,8 +556,11 @@ class ParticleTransformer(nn.Module):
         # Per-particle classification
         logits = self.classifier(x)
 
+        probabilities = torch.softmax(logits, dim=-1)
+
         return {
             "logits": logits,
+            "probabilities": probabilities,
         }
 
 ###########################################################################
@@ -566,13 +576,15 @@ class ParticleTransformerDataset(Dataset):
     Expected input dictionary format:
 
         {
-            "particles"       : Tensor(N,F),
-            "mask"            : Tensor(N),
-            "raw_pt"          : Tensor(N),
-            "raw_eta"         : Tensor(N),
-            "raw_phi"         : Tensor(N),
-            "raw_E"           : Tensor(N),
-            "truthLabel"      : Tensor(N),
+            "particles"          : Tensor(N,F),
+            "mask"               : Tensor(N),
+            "raw_pt"             : Tensor(N),
+            "raw_eta"            : Tensor(N),
+            "raw_phi"            : Tensor(N),
+            "raw_E"              : Tensor(N),
+            "truthLabel"         : Tensor(N),
+            "algorithmLabel"     : Tensor(N),
+            "algorithmCA8Label"  : Tensor(N),
         }
     """
 
@@ -594,6 +606,7 @@ class ParticleTransformerDataset(Dataset):
 
         self.truth_labels = dataset["truthLabel"]
         self.algorithm_labels = dataset["algorithmLabel"]
+        self.algorithm_CA8labels = dataset["algorithmCA8Label"]
 
         # Only keep requested split indices
         self.indices = indices
@@ -633,6 +646,9 @@ class ParticleTransformerDataset(Dataset):
 
             "algorithmLabel":
                 self.algorithm_labels[event_idx],
+                
+            "algorithmCA8Label":
+                self.algorithm_CA8labels[event_idx],
         }
 
 ###########################################################################
@@ -743,8 +759,6 @@ class PretrainingLoss(nn.Module):
         self,
         logits,
         algorithm_labels,
-        truth_labels,
-        mask,
     ):
 
         return self.ce(
@@ -753,32 +767,205 @@ class PretrainingLoss(nn.Module):
         )
 
 ###########################################################################
-# Cross entropy loss (used in pretraining)
+# Two-body loss (used in final training)
 ###########################################################################
 
 class TwoBodyLoss(nn.Module):
 
     """
-    Placeholder.
+    Differentiable event-level reconstruction loss.
 
-    Eventually this will become the full differentiable
-    event-level physics loss.
+    L = L_angle + L_mass + L_entropy + L_split + L_occupancy + L_isr_anisotropy
     """
 
     def __init__(self):
+
         super().__init__()
 
     def forward(
         self,
-        logits,
-        algorithm_labels,
-        truth_labels,
+        probabilities,
+        raw_pt,
+        raw_eta,
+        raw_phi,
+        raw_E,
+        algorithm_CA8labels,
         mask,
     ):
 
-        raise NotImplementedError(
-            "TwoBodyLoss has not been implemented yet."
+        eps = 1e-8
+
+        mask = mask.float()
+
+        # Particle four-vectors
+        px = raw_pt * torch.cos(raw_phi)
+        py = raw_pt * torch.sin(raw_phi)
+        pz = raw_pt * torch.sinh(raw_eta)
+
+        # Predicted probabilities
+        p_chi0 = probabilities[...,0] * mask
+        p_chi1 = probabilities[...,1] * mask
+        p_isr  = probabilities[...,2] * mask
+
+        # Reconstructed chi four-vectors
+        chi0_px = torch.sum(p_chi0 * px, dim=1)
+        chi0_py = torch.sum(p_chi0 * py, dim=1)
+        chi0_pz = torch.sum(p_chi0 * pz, dim=1)
+        chi0_E  = torch.sum(p_chi0 * raw_E, dim=1)
+
+        chi1_px = torch.sum(p_chi1 * px, dim=1)
+        chi1_py = torch.sum(p_chi1 * py, dim=1)
+        chi1_pz = torch.sum(p_chi1 * pz, dim=1)
+        chi1_E  = torch.sum(p_chi1 * raw_E, dim=1)
+
+        # Reconstructed ISR four-vector
+
+        isr_px = torch.sum(p_isr * px, dim=1)
+        isr_py = torch.sum(p_isr * py, dim=1)
+        isr_pz = torch.sum(p_isr * pz, dim=1)
+        isr_E  = torch.sum(p_isr * raw_E, dim=1)
+
+        # Chi masses
+        chi0_mass2 = (
+            chi0_E**2
+            - chi0_px**2
+            - chi0_py**2
+            - chi0_pz**2
         )
+
+        chi1_mass2 = (
+            chi1_E**2
+            - chi1_px**2
+            - chi1_py**2
+            - chi1_pz**2
+        )
+
+        chi0_mass = torch.sqrt(torch.clamp(chi0_mass2, min=0.))
+        chi1_mass = torch.sqrt(torch.clamp(chi1_mass2, min=0.))
+
+        # Boost into reconstructed chi-chi COM frame
+        pair_px = chi0_px + chi1_px
+        pair_py = chi0_py + chi1_py
+        pair_pz = chi0_pz + chi1_pz
+        pair_E  = chi0_E  + chi1_E
+
+        beta_x = pair_px / (pair_E + eps)
+        beta_y = pair_py / (pair_E + eps)
+        beta_z = pair_pz / (pair_E + eps)
+
+        beta2 = beta_x**2 + beta_y**2 + beta_z**2
+        beta2 = torch.clamp(beta2, max=0.999999)
+
+        gamma = 1.0 / torch.sqrt(1.0 - beta2)
+
+        def boost(px, py, pz, E):
+
+            bp = (
+                beta_x * px +
+                beta_y * py +
+                beta_z * pz
+            )
+
+            gamma2 = (gamma - 1.0) / (beta2 + eps)
+
+            px_new = px + gamma2 * bp * beta_x - gamma * beta_x * E
+            py_new = py + gamma2 * bp * beta_y - gamma * beta_y * E
+            pz_new = pz + gamma2 * bp * beta_z - gamma * beta_z * E
+
+            return px_new, py_new, pz_new
+
+        chi0_px_b, chi0_py_b, chi0_pz_b = boost(chi0_px, chi0_py, chi0_pz, chi0_E)
+        chi1_px_b, chi1_py_b, chi1_pz_b = boost(chi1_px, chi1_py, chi1_pz, chi1_E)
+
+        # Equal mass loss
+        mass_loss = (torch.abs(chi0_mass - chi1_mass) / (chi0_mass + chi1_mass + eps))
+
+        # Back-to-back angle loss
+        dot = (chi0_px_b * chi1_px_b + chi0_py_b * chi1_py_b + chi0_pz_b * chi1_pz_b)
+
+        mag0 = torch.sqrt(chi0_px_b**2 + chi0_py_b**2 + chi0_pz_b**2 + eps)
+        mag1 = torch.sqrt( chi1_px_b**2 + chi1_py_b**2 + chi1_pz_b**2 + eps)
+
+        cos_theta = dot / (mag0 * mag1)
+
+        angle_loss = 1.0 + cos_theta
+
+        # Entropy loss
+        entropy = -torch.sum(probabilities * torch.log(probabilities + eps), dim=-1)
+
+        entropy_loss = (entropy * mask).sum(dim=1) / (mask.sum(dim=1) + eps)
+
+        # Energy occupancy loss
+        chi0_energy = torch.sum(p_chi0 * raw_E, dim=1)
+        chi1_energy = torch.sum(p_chi1 * raw_E, dim=1)
+
+        occupancy_loss = (torch.abs(chi0_energy - chi1_energy) / (chi0_energy + chi1_energy + eps))
+
+        # 5. Jet coherence penalty
+        split_loss = torch.zeros(probabilities.shape[0], device=probabilities.device)
+
+        B = probabilities.shape[0]
+
+        for b in range(B):
+
+            labels = algorithm_CA8labels[b]
+
+            probs = probabilities[b]
+
+            valid_labels = labels[labels >= 0].unique()
+
+            event_loss = 0.0
+            n_jets = 0
+
+            for jet in valid_labels:
+
+                jet_mask = labels == jet
+
+                # Ignore jets with fewer than two particles
+                if jet_mask.sum() < 2:
+                    continue
+
+                # Ignore ISR component
+                jet_probs = probs[jet_mask, :2]
+
+                # Average assignment vector for this jet
+                jet_mean = jet_probs.mean(dim=0, keepdim=True)
+
+                # Cosine similarity between every particle and jet-average assignment
+                cosine = F.cosine_similarity(
+                    jet_probs,
+                    jet_mean.expand_as(jet_probs),
+                    dim=1,
+                    eps=eps,
+                )
+
+                event_loss += (1.0 - cosine).mean()
+
+                n_jets += 1
+
+            if n_jets > 0:
+                split_loss[b] = event_loss / n_jets
+
+        # ISR anisotropy loss
+        isr_vector = torch.sqrt(isr_px**2 + isr_py**2 + isr_pz**2 + eps)
+
+        particle_p = torch.sqrt(px**2 + py**2 + pz**2 + eps)
+
+        isr_scalar = torch.sum(p_isr * particle_p, dim=1)
+
+        isr_loss = isr_vector / (isr_scalar + eps)
+
+        # Combine
+        loss = (
+            LAMBDA_MASS * mass_loss
+            + LAMBDA_ANGLE * angle_loss
+            + LAMBDA_ENTROPY * entropy_loss
+            + LAMBDA_OCCUPANCY * occupancy_loss
+            + LAMBDA_SPLIT * split_loss
+            + LAMBDA_ISR * isr_loss
+        )
+
+        return loss.mean()
 
 ###########################################################################
 # Training utilities
@@ -814,8 +1001,9 @@ def train_one_epoch(
         raw_phi = batch["raw_phi"].to(device)
         raw_E = batch["raw_E"].to(device)
 
-        algorithm_labels = batch["algorithmLabel"].to(device)
         truth_labels = batch["truthLabel"].to(device)
+        algorithm_labels = batch["algorithmLabel"].to(device)
+        algorithm_CA8labels = batch["algorithmCA8Label"].to(device)
 
         # Forward pass
         outputs = model(
@@ -828,20 +1016,25 @@ def train_one_epoch(
         )
 
         logits = outputs["logits"]
+        probabilities = outputs["probabilities"]
 
         # Compute loss
         # logits: (B,N,NUM_CLASSES)
 
-        if (trainMode == "pretrain"):
+        if trainMode == "pretrain":
             loss = criterion(
                 logits.reshape(-1, NUM_CLASSES),
                 algorithm_labels.reshape(-1),
             )
         else:
-            # todo: find two body loss
             loss = criterion(
-                logits.reshape(-1, NUM_CLASSES),
-                algorithm_labels.reshape(-1),
+                probabilities,
+                raw_pt,
+                raw_eta,
+                raw_phi,
+                raw_E,
+                algorithm_CA8labels,
+                mask,
             )
 
         # Backpropagation
@@ -888,8 +1081,9 @@ def validate(
             raw_phi = batch["raw_phi"].to(device)
             raw_E = batch["raw_E"].to(device)
 
-            algorithm_labels = batch["algorithmLabel"].to(device)
             truth_labels = batch["truthLabel"].to(device)
+            algorithm_labels = batch["algorithmLabel"].to(device)
+            algorithm_CA8labels = batch["algorithmCA8Label"].to(device)
 
             outputs = model(
                 particles,
@@ -901,17 +1095,22 @@ def validate(
             )
 
             logits = outputs["logits"]
+            probabilities = outputs["probabilities"]
 
-            if (trainMode == "pretrain"):
+            if trainMode == "pretrain":
                 loss = criterion(
                     logits.reshape(-1, NUM_CLASSES),
                     algorithm_labels.reshape(-1),
                 )
             else:
-                # todo: find two body loss
                 loss = criterion(
-                    logits.reshape(-1, NUM_CLASSES),
-                    algorithm_labels.reshape(-1),
+                    probabilities,
+                    raw_pt,
+                    raw_eta,
+                    raw_phi,
+                    raw_E,
+                    truth_labels,
+                    mask,
                 )
 
             batch_size = particles.shape[0]
@@ -962,7 +1161,7 @@ def train(
     batch_size=64,
     learning_rate=1e-4,
     output_path="test_model",
-    trainMode="no_use_pretrained",
+    trainMode="pretrain",
 ):
 
     # Device
@@ -1001,7 +1200,15 @@ def train(
     input_dim = sample["particles"].shape[-1]
 
     # Model
-    checkpoint_path = ("checkpoints/" + output_path + ".pt")
+    tmp_path = f"checkpoints/{output_path}.pt"
+
+    if trainMode == "use_pretrained":
+        checkpoint_path = tmp_path.replace(
+            "_use_pretrained",
+            "_pretrain",
+        )
+    else:
+        checkpoint_path = tmp_path
 
     model = build_model(
         input_dim=input_dim,
@@ -1091,51 +1298,37 @@ def main(args):
     Path("checkpoints").mkdir(parents=True, exist_ok=True)
 
     # Assign data modes, pretraining modes
-    if args.dataMode == "all":
+    dataModes = (
+        ["all_pf", "ak8_constituents", "ak4_constituents", "all_constituents"]
+        if args.dataMode == "all"
+        else [args.dataMode]
+    )
 
-        dataset_paths = [
-            args.input + "_all_pf",
-            args.input + "_ak8_constituents",
-            args.input + "_ak4_constituents",
-            args.input + "_all_constituents",
-        ]
+    trainModes = (
+        ["pretrain", "use_pretrained", "no_use_pretrained"]
+        if args.trainMode == "all"
+        else [args.trainMode]
+    )
 
-        output_paths = [
-            args.output + "_all_pf",
-            args.output + "_ak8_constituents",
-            args.output + "_ak4_constituents",
-            args.output + "_all_constituents",
-        ]
-        
-    else:
+    jobs = []
 
-        dataset_paths = [args.input + "_" + args.dataMode]
-        output_paths = [args.output + "_" + args.dataMode]
-
-    if args.trainMode == "all":
-
-        trainModes = [
-            "pretrain",
-            "use_pretrained",
-            "no_use_pretrained",
-        ]
-    
-    else:
-
-        trainModes = [args.trainMode]
-
-    for dataset_path, output_path in zip(dataset_paths, output_paths):
-
+    for dataMode in dataModes:
         for trainMode in trainModes:
+            jobs.append({
+                "dataset_path": f"{args.input}_{dataMode}",
+                "output_path": f"{args.output}_{dataMode}_{trainMode}",
+                "trainMode": trainMode,
+            })
 
-            train(
-                dataset_path=dataset_path,
-                epochs=args.epochs,
-                batch_size=args.batch_size,
-                learning_rate=args.learning_rate,
-                output_path=output_path,
-                trainMode=trainMode,
-            )
+    for job in jobs:
+        train(
+            dataset_path=job["dataset_path"],
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            output_path=job["output_path"],
+            trainMode=job["trainMode"],
+        )
 
 if __name__ == "__main__":
 

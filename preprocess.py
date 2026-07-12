@@ -370,8 +370,9 @@ def build_targets(arrays, mode="all_pf"):
 
     order = ak.argsort(arrays["particle_pt"][particle_mask], ascending=False)
 
-    truthLabel = arrays["particle_truthLabel"][particle_mask][order]
-    algorithmLabel = arrays["particle_algorithmLabel"][particle_mask][order]
+    truthLabel        = arrays["particle_truthLabel"][particle_mask][order]
+    algorithmLabel    = arrays["particle_algorithmLabel"][particle_mask][order]
+    algorithmCA8Label = arrays["particle_algorithmCA8Label"][particle_mask][order]
 
     # Identify whether each particle has ancestry from chi0 or chi1
     has_chi0 = ak.any((truthLabel >= 1) & (truthLabel <= 10), axis=2)
@@ -393,8 +394,9 @@ def build_targets(arrays, mode="all_pf"):
     if n_mixed > 0:
         print(f"Warning: assigning {n_mixed} mixed-ancestry particles to chi0.")
 
-    targets["truthLabel"] = pad_array(truthLabel, pad_value=-1).astype(np.int64)
-    targets["algorithmLabel"] = pad_array(algorithmLabel, pad_value=-1).astype(np.int64)
+    targets["truthLabel"]        = pad_array(truthLabel, pad_value=-1).astype(np.int64)
+    targets["algorithmLabel"]    = pad_array(algorithmLabel, pad_value=-1).astype(np.int64)
+    targets["algorithmCA8Label"] = pad_array(algorithmCA8Label, pad_value=-1).astype(np.int64)
     
     return targets
 
@@ -486,6 +488,7 @@ def main(args):
                 "chi1": torch.tensor(targets["chi1"]),
                 "truthLabel": torch.tensor(targets["truthLabel"]),
                 "algorithmLabel": torch.tensor(targets["algorithmLabel"]),
+                "algorithmCA8Label": torch.tensor(targets["algorithmCA8Label"]),
 
                 "train_idx": torch.tensor(train_idx),
                 "val_idx": torch.tensor(val_idx),
