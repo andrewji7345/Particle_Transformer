@@ -362,7 +362,7 @@ def build_targets(arrays, mode="all_pf"):
     ).astype(np.float32)
 
     ##########################################################
-    # Extract particle-level truth labels, ordering by pt
+    # Extract particle-level truth and algorithm labels, ordering by pt
     # Depending on mode, throw some particles out
     ##########################################################
 
@@ -371,6 +371,7 @@ def build_targets(arrays, mode="all_pf"):
     order = ak.argsort(arrays["particle_pt"][particle_mask], ascending=False)
 
     truthLabel = arrays["particle_truthLabel"][particle_mask][order]
+    algorithmLabel = arrays["particle_algorithmLabel"][particle_mask][order]
 
     # Identify whether each particle has ancestry from chi0 or chi1
     has_chi0 = ak.any((truthLabel >= 1) & (truthLabel <= 10), axis=2)
@@ -393,6 +394,7 @@ def build_targets(arrays, mode="all_pf"):
         print(f"Warning: assigning {n_mixed} mixed-ancestry particles to chi0.")
 
     targets["truthLabel"] = pad_array(truthLabel, pad_value=-1).astype(np.int64)
+    targets["algorithmLabel"] = pad_array(algorithmLabel, pad_value=-1).astype(np.int64)
     
     return targets
 
@@ -406,7 +408,6 @@ def make_splits(n_events, seed=42):
     Output:
         train_idx, val_idx, test_idx
     """
-
 
     idx = np.arange(n_events)
 
@@ -428,63 +429,76 @@ def make_splits(n_events, seed=42):
 
 def main(args):
 
-    shard_id = 0
-    all_train, all_val, all_test = [], [], []
+    if args.dataMode == "all":
+        modes = [
+            "all_pf",
+            "ak8_constituents",
+            "ak4_constituents",
+            "all_constituents",
+        ]
+    else:
+        modes = [args.dataMode]
 
-    # Iterate over shards; cannot process all particles from all events at once
-    for arrays in uproot.iterate(
-        f"{args.input}:{args.tree}",
-        step_size=5000,
-        library="ak",
-    ):
+    for mode in modes:
 
-        # Process particles + globals
-        (
-            X_particles,
-            padding_mask,
-            raw_pt,
-            raw_eta,
-            raw_phi,
-            raw_E,
-            global_features,
-        ) = process_events(arrays, mode = args.mode)
+        shard_id = 0
+        all_train, all_val, all_test = [], [], []
 
-        # Build targets
-        targets = build_targets(arrays, mode = args.mode)
+        # Iterate over shards; cannot process all particles from all events at once
+        for arrays in uproot.iterate(
+            f"{args.input}:{args.tree}",
+            step_size=5000,
+            library="ak",
+        ):
 
-        # Make train/val/test splits
-        n_events = X_particles.shape[0]
-        train_idx, val_idx, test_idx = make_splits(n_events)
+            # Process particles + globals
+            (
+                X_particles,
+                padding_mask,
+                raw_pt,
+                raw_eta,
+                raw_phi,
+                raw_E,
+                global_features,
+            ) = process_events(arrays, mode)
 
-        # Dict of datasets
-        dataset_torch = {
-            "particles": torch.tensor(X_particles),
-            "mask": torch.tensor(padding_mask, dtype=torch.bool),
+            # Build targets
+            targets = build_targets(arrays, mode)
 
-            "raw_pt": torch.tensor(raw_pt),
-            "raw_eta": torch.tensor(raw_eta),
-            "raw_phi": torch.tensor(raw_phi),
-            "raw_E": torch.tensor(raw_E),
+            # Make train/val/test splits
+            n_events = X_particles.shape[0]
+            train_idx, val_idx, test_idx = make_splits(n_events)
 
-            "global": torch.tensor(global_features),
+            # Dict of datasets
+            dataset_torch = {
+                "particles": torch.tensor(X_particles),
+                "mask": torch.tensor(padding_mask, dtype=torch.bool),
 
-            "suu": torch.tensor(targets["Suu"]),
-            "chi0": torch.tensor(targets["chi0"]),
-            "chi1": torch.tensor(targets["chi1"]),
-            "truthLabel": torch.tensor(targets["truthLabel"]),
+                "raw_pt": torch.tensor(raw_pt),
+                "raw_eta": torch.tensor(raw_eta),
+                "raw_phi": torch.tensor(raw_phi),
+                "raw_E": torch.tensor(raw_E),
 
-            "train_idx": torch.tensor(train_idx),
-            "val_idx": torch.tensor(val_idx),
-            "test_idx": torch.tensor(test_idx),
-        }
+                "global": torch.tensor(global_features),
 
-        # Save
-        out_file = args.output.replace(".pt", f"_{args.mode}_shard{shard_id:04d}.pt")
-        torch.save(dataset_torch, out_file)
+                "suu": torch.tensor(targets["Suu"]),
+                "chi0": torch.tensor(targets["chi0"]),
+                "chi1": torch.tensor(targets["chi1"]),
+                "truthLabel": torch.tensor(targets["truthLabel"]),
+                "algorithmLabel": torch.tensor(targets["algorithmLabel"]),
 
-        print(f"[INFO] Wrote {out_file} with {n_events} events")
+                "train_idx": torch.tensor(train_idx),
+                "val_idx": torch.tensor(val_idx),
+                "test_idx": torch.tensor(test_idx),
+            }
 
-        shard_id += 1
+            # Save
+            out_file = args.output.replace(".pt", f"_{mode}_shard{shard_id:04d}.pt")
+            torch.save(dataset_torch, out_file)
+
+            print(f"[INFO] Wrote {out_file} with {n_events} events")
+
+            shard_id += 1
 
 if __name__ == "__main__":
 
@@ -513,15 +527,16 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--mode",
+        "--dataMode",
         choices=[
             "all_pf",
             "ak8_constituents",
             "ak4_constituents",
             "all_constituents",
+            "all",
         ],
         default="all_pf",
-        help="Store all_pf, ak8_constituents, ak4_constituents, all_constituents",
+        help="Store all_pf, ak8_constituents, ak4_constituents, all_constituents, or all",
     )
 
     args = parser.parse_args()

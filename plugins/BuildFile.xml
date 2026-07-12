@@ -12,5 +12,8 @@
 
 <use name="PhysicsTools/PatAlgos"/>
 
+<use name="fastjet"/>
+
 <use name="root"/>
+<use name="rootmath"/>
 <flags EDM_PLUGIN="1"/>

@@ -7,6 +7,8 @@
 #include <cmath>
 #include <string>
 #include <iostream>
+#include "TLorentzVector.h"
+#include <vector>
 
 // Framework
 #include "FWCore/Framework/interface/Frameworkfwd.h"
@@ -25,6 +27,8 @@
 #include "DataFormats/PatCandidates/interface/PackedCandidate.h"
 #include "DataFormats/PatCandidates/interface/MET.h"
 #include "DataFormats/VertexReco/interface/Vertex.h"
+#include "DataFormats/PatCandidates/interface/PackedCandidate.h"
+#include "DataFormats/PatCandidates/interface/Jet.h"
 
 // ROOT
 #include "TTree.h"
@@ -32,6 +36,10 @@
 // TFileService
 #include "CommonTools/UtilAlgos/interface/TFileService.h"
 #include "FWCore/ServiceRegistry/interface/Service.h"
+
+// Clustering
+#include "fastjet/PseudoJet.hh"
+#include "fastjet/ClusterSequence.hh"
 
 //--------------------------------------------------
 // Helper function: find last copy of a particle
@@ -243,6 +251,478 @@ struct CellHash {
   }
 };
 
+//----------------------------------------------------------------------
+// Old jet sorting algorithm
+//----------------------------------------------------------------------
+
+class oldJetSortingAlgorithm {
+
+public:
+
+  oldJetSortingAlgorithm();
+
+  void run(const pat::PackedCandidateCollection& pfcands,
+           const pat::JetCollection& ak8Jets);
+
+  const std::vector<int>& labels() const {
+      return labels_;
+  }
+
+private:
+
+  // Helper structs
+
+  struct Constituent {
+    int pfIndex;                // index in PackedCandidate collection
+    int originalAK8;            // index of original AK8 jet
+    TLorentzVector p4;          // four-vector (evolves!)
+  };
+
+  struct ReclusteredJet {
+    fastjet::PseudoJet jet;     // jet
+    int label = -1;             // 0 for unassigned, 1 for chi0, 2 for chi1
+    std::vector<int> pfIndices; // store indices for jet constituents
+  };
+
+  // Helper functions
+
+  void clear();
+
+  void collectConstituents(const pat::PackedCandidateCollection& pfcands,
+                           const pat::JetCollection& ak8Jets);
+
+  void computeMPPBoost();
+
+  void boostConstituents();
+
+  void reclusterCA8();
+
+  void findThrustAxis();
+
+  void assignCA8ToChiUsingCos();
+
+  TLorentzVector pseudoJetToTLV(const fastjet::PseudoJet& jet);
+
+  void assignCA8ToChiUsingMassDiff();
+
+  void enforceChiPtOrdering();
+
+  void assignParticleLabels();
+
+  // Stored state
+
+  std::vector<Constituent> constituents_;
+
+  std::vector<ReclusteredJet> ca8Jets_;
+
+  std::vector<int> labels_;
+
+  TLorentzVector totalP4_;
+
+  TVector3 betaMPP_;
+
+  TVector3 thrustAxis_;
+
+  std::vector<fastjet::PseudoJet> fjParticles_;
+
+};
+
+// Constructor
+
+oldJetSortingAlgorithm::oldJetSortingAlgorithm() {}
+
+// clear
+
+void oldJetSortingAlgorithm::clear() {
+
+    constituents_.clear();
+    labels_.clear();
+
+    totalP4_.SetPxPyPzE(0., 0., 0., 0.);
+    betaMPP_.SetXYZ(0., 0., 0.);
+    thrustAxis_.SetXYZ(0., 0., 0.);
+
+    fjParticles_.clear();
+    ca8Jets_.clear();
+
+}
+
+// run
+
+void oldJetSortingAlgorithm::run(
+  const pat::PackedCandidateCollection& pfcands,
+  const pat::JetCollection& ak8Jets) {
+
+  clear();
+
+  labels_.assign(pfcands.size(), 0);
+  constituents_.reserve(pfcands.size());
+
+  collectConstituents(pfcands, ak8Jets);
+
+  computeMPPBoost();
+
+  boostConstituents();
+
+  reclusterCA8();
+
+  findThrustAxis();
+
+  assignCA8ToChiUsingCos();
+
+  assignCA8ToChiUsingMassDiff();
+
+  enforceChiPtOrdering();
+
+  assignParticleLabels();
+
+}
+
+// collectConstituents
+
+void oldJetSortingAlgorithm::collectConstituents(
+  const pat::PackedCandidateCollection& pfcands,
+  const pat::JetCollection& ak8Jets) {
+    
+  for (size_t jetIdx = 0; jetIdx < ak8Jets.size(); ++jetIdx) { // Loop over fatjets
+
+    const auto& jet = ak8Jets[jetIdx];
+
+    if (jet.pt() < 300.)
+      continue;
+
+    for (const auto& daughter : jet.daughterPtrVector()) { // Loop over fatjet constituents
+
+      // PackedCandidate index in the original collection
+      int pfIndex = daughter.key();
+
+      // Protect against invalid keys
+      if (pfIndex < 0 || pfIndex >= static_cast<int>(pfcands.size()))
+        continue;
+
+      Constituent c;
+
+      c.pfIndex = pfIndex;
+      c.originalAK8 = jetIdx;
+
+      const auto& pfcand = pfcands[pfIndex];
+
+      c.p4.SetPxPyPzE(
+        pfcand.px(),
+        pfcand.py(),
+        pfcand.pz(),
+        pfcand.energy());
+
+      constituents_.push_back(c);
+    }
+  }
+
+}
+
+// computeMPPBoost
+
+void oldJetSortingAlgorithm::computeMPPBoost() {
+
+    totalP4_.SetPxPyPzE(0., 0., 0., 0.);
+
+    for (const auto& constituent : constituents_) {
+        totalP4_ += constituent.p4;
+    }
+
+    betaMPP_ = totalP4_.BoostVector();
+
+}
+
+// boostConstituents
+
+void oldJetSortingAlgorithm::boostConstituents() {
+
+  for (auto& constituent : constituents_) {
+    constituent.p4.Boost(-betaMPP_);
+  }
+
+}
+
+// reclusterCA8
+
+void oldJetSortingAlgorithm::reclusterCA8() {
+
+  fjParticles_.clear();
+  ca8Jets_.clear();
+
+  //--------------------------------------------------
+  // Convert constituents into FastJet pseudojets
+  //--------------------------------------------------
+
+  for (const auto& constituent : constituents_) {
+
+    fastjet::PseudoJet pj(
+      constituent.p4.Px(),
+      constituent.p4.Py(),
+      constituent.p4.Pz(),
+      constituent.p4.E());
+
+    // Preserve the original PackedCandidate index
+    pj.set_user_index(constituent.pfIndex);
+
+    fjParticles_.push_back(pj);
+
+  }
+
+  //--------------------------------------------------
+  // Run CA8 reclustering
+  //--------------------------------------------------
+
+  fastjet::JetDefinition jetDef(fastjet::cambridge_algorithm, 0.8);
+
+  fastjet::ClusterSequence clusterSequence(fjParticles_, jetDef);
+
+  std::vector<fastjet::PseudoJet> ca8Jets_tmp = fastjet::sorted_by_pt(clusterSequence.inclusive_jets());
+
+  for (fastjet::PseudoJet ca8Jet_tmp : ca8Jets_tmp) {
+
+    ReclusteredJet j;
+
+    j.jet = ca8Jet_tmp;
+    j.label = -1;
+
+    for (const auto& constituent: ca8Jet_tmp.constituents()) {
+      j.pfIndices.push_back(constituent.user_index());
+    }
+
+    ca8Jets_.push_back(j);
+
+  }
+
+}
+
+// findThrustAxis
+
+void oldJetSortingAlgorithm::findThrustAxis() {
+
+  if (constituents_.empty()) {
+    thrustAxis_.SetXYZ(0,0,0);
+    return;
+  }
+
+  // Initial guess: direction of hardest constituent
+  auto maxIt = std::max_element(
+    constituents_.begin(),
+    constituents_.end(),
+    [](const Constituent& a, const Constituent& b) {
+      return a.p4.P() < b.p4.P();
+    }
+  );
+
+  TVector3 axis = maxIt->p4.Vect().Unit();
+
+  // Numerically solve
+  const int maxIterations = 100;
+  const double tolerance = 1e-6;
+
+  for (int iter = 0; iter < maxIterations; ++iter) {
+
+    TVector3 newAxis(0,0,0);
+
+    // Construct signed momentum sum
+    for (const auto& c : constituents_) {
+
+      TVector3 p = c.p4.Vect();
+
+      if (p.Dot(axis) >= 0)
+        newAxis += p;
+      else
+        newAxis -= p;
+    }
+
+    newAxis = newAxis.Unit();
+
+    // Check convergence
+    if ((newAxis - axis).Mag() < tolerance) {
+      axis = newAxis;
+      break;
+    }
+
+    axis = newAxis;
+  }
+
+  thrustAxis_ = axis;
+
+}
+
+// assignCA8ToChiUsingCos
+
+void oldJetSortingAlgorithm::assignCA8ToChiUsingCos() {
+
+  for (size_t i = 0; i < ca8Jets_.size(); i++) {
+
+    TVector3 jetDir(ca8Jets_[i].jet.px(), ca8Jets_[i].jet.py(), ca8Jets_[i].jet.pz());
+
+    jetDir = jetDir.Unit();
+
+    double cosChi = jetDir.Dot(thrustAxis_);
+
+    if (cosChi > 0.85) {
+      ca8Jets_[i].label = 1;
+    }
+    else if (cosChi < -0.85) {
+      ca8Jets_[i].label = 2;
+    }
+    else {
+      ca8Jets_[i].label = 0; // Leave it for assignCA8ToChiUsingMassDiff()
+    }
+  }
+
+}
+
+// pseudoJetToTLV
+
+TLorentzVector oldJetSortingAlgorithm::pseudoJetToTLV(const fastjet::PseudoJet& jet) {
+
+    TLorentzVector p4;
+    p4.SetPxPyPzE(jet.px(), jet.py(), jet.pz(), jet.e());
+    return p4;
+
+}
+
+// assignCA8ToChiUsingMassDiff
+
+void oldJetSortingAlgorithm::assignCA8ToChiUsingMassDiff() {
+
+  const size_t nJets = ca8Jets_.size();
+
+  if (nJets == 0)
+    return;
+
+  std::vector<int> bestLabels(nJets);
+  std::vector<int> origLabels(nJets);
+  std::vector<int> tempLabels(nJets);
+  std::vector<TLorentzVector> jetP4s(nJets);
+  
+  for (size_t i = 0; i < nJets; ++i) { // adjust labeling scheme for bitwise mask
+    bestLabels[i] = ca8Jets_[i].label-1;
+    origLabels[i] = ca8Jets_[i].label-1;
+    jetP4s[i] = pseudoJetToTLV(ca8Jets_[i].jet);
+  }
+
+  double bestScore = std::numeric_limits<double>::max();
+
+  const size_t nMasks = 1u << (nJets); // 2^(nJets) possible masks
+
+  for (size_t mask = 0; mask < nMasks; ++mask) {
+
+    TLorentzVector chi0;
+    TLorentzVector chi1;
+
+    for (size_t j = 0; j < nJets; ++j) {
+
+      int assignment;
+
+      // Respect fixed cosine assignments
+
+      if (origLabels[j] == 0)
+        assignment = 0;
+      else if (origLabels[j] == 1)
+        assignment = 1;
+      else
+        assignment = (mask >> j) & 1;
+
+      if (assignment == 0)
+        chi0 += jetP4s[j];
+      else
+        chi1 += jetP4s[j];
+
+      tempLabels[j] = assignment;
+
+    }
+
+    // Require both chis to receive something
+
+    if (chi0.E() <= 0 || chi1.E() <= 0)
+      continue;
+
+    double m0 = chi0.M();
+    double m1 = chi1.M();
+
+    if (std::min(m0, m1) <= 0.)
+      continue;
+
+    double fracDiff = std::abs(m0 - m1) / std::min(m0, m1);
+
+    if (fracDiff < bestScore) {
+
+      bestScore = fracDiff;
+      bestLabels = tempLabels;
+
+    }
+
+  }
+
+  // If it failed, don't overwrite anything
+  if (bestScore == std::numeric_limits<double>::max())
+    return;
+
+  // Adjust labeling scheme back to 0, 1, 2
+  for (size_t i = 0; i < nJets; ++i) { 
+
+    ca8Jets_[i].label = bestLabels[i]+1;
+
+  }
+
+}
+
+// enforceChiPtOrdering
+
+void oldJetSortingAlgorithm::enforceChiPtOrdering() {
+
+  TLorentzVector chi0;
+  TLorentzVector chi1;
+
+  for (const auto& jet : ca8Jets_) {
+
+    if (jet.label == 1)
+      chi0 += pseudoJetToTLV(jet.jet);
+
+    else if (jet.label == 2)
+      chi1 += pseudoJetToTLV(jet.jet);
+
+  }
+
+  // Already in desired convention
+  if (chi0.Pt() >= chi1.Pt())
+    return;
+
+  // Swap chi labels
+  for (auto& jet : ca8Jets_) {
+
+    if (jet.label == 1)
+      jet.label = 2;
+
+    else if (jet.label == 2)
+      jet.label = 1;
+
+  }
+
+}
+
+void oldJetSortingAlgorithm::assignParticleLabels() {
+
+  std::fill(labels_.begin(), labels_.end(), 0);
+
+  for (const auto& jet : ca8Jets_) {
+
+    for (int pfIndex : jet.pfIndices) {
+
+      if (pfIndex >= 0 && pfIndex < static_cast<int>(labels_.size())) {
+        labels_[pfIndex] = jet.label;
+      }
+
+    }
+
+  }
+
+}
+
 //--------------------------------------------------
 // Ntuplizer class declaration
 //--------------------------------------------------
@@ -307,6 +787,8 @@ class ParticleTransformerNtuplizer: public edm::one::EDAnalyzer<edm::one::Shared
 
   std::vector<int> particle_ak4Index;
   std::vector<int> particle_ak8Index;
+
+  std::vector<int> particle_algorithmLabel;
 
   std::vector<float> ak8_pt;
   std::vector<float> ak8_eta;
@@ -471,6 +953,7 @@ void ParticleTransformerNtuplizer::printEventDebug() {
 
     std::cout << "  matchPDG=" << particle_match_pdgid[i]
               << " matchDR2=" << particle_match_dr2[i]
+              << " algorithmLabel=" << particle_algorithmLabel[i]
               << " truthLabels=";
 
     for (auto label : particle_truthLabel[i])
@@ -621,6 +1104,8 @@ void ParticleTransformerNtuplizer::beginJob(){
   tree_->Branch("particle_ak4Index", &particle_ak4Index);
   tree_->Branch("particle_ak8Index", &particle_ak8Index);
 
+  tree_->Branch("particle_algorithmLabel", &particle_algorithmLabel);
+
   // TODO: add distance to nearest AK4/AK8 jet (even if it is already clustered into a jet)
 
   // AK8 jets
@@ -705,6 +1190,8 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
 
   particle_ak4Index.clear();
   particle_ak8Index.clear();
+
+  particle_algorithmLabel.clear();
 
   ak8_pt.clear();
   ak8_eta.clear();
@@ -807,6 +1294,8 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
 
   particle_ak4Index.reserve(packedPFCands->size());
   particle_ak8Index.reserve(packedPFCands->size());
+
+  particle_algorithmLabel.reserve(packedPFCands->size());
 
   ak8_pt.reserve(ak8Jets->size());
   ak8_eta.reserve(ak8Jets->size());
@@ -1245,8 +1734,16 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
 
   } // end loop over pf cands
 
+  // Run existing jet sorting algorithm
+  oldJetSortingAlgorithm alg;
+
+  alg.run(*packedPFCands, *ak8Jets);
+
+  particle_algorithmLabel = alg.labels();
+
   // Fill tree
   assert(particle_pt.size() == particle_truthLabel.size());
+  assert(particle_pt.size() == particle_algorithmLabel.size());
   assert(particle_pt.size() == particle_eta.size());
   assert(particle_pt.size() == particle_phi.size());
   assert(particle_pt.size() == particle_energy.size());

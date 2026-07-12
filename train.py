@@ -52,7 +52,6 @@ NUM_CLASSES = 3
 class ParticleEmbedding(nn.Module):
     """
     Embed the raw particle features into the transformer latent space.
-    Used in each Particle Attention Block.
 
     Input:
         (B, N, F)
@@ -402,7 +401,7 @@ class ParticleMultiHeadAttention(nn.Module):
             EMBED_DIM,
         )
 
-        output.masked_fill(
+        output = output.masked_fill(
             ~mask.unsqueeze(-1),
             0.,
         )
@@ -593,7 +592,8 @@ class ParticleTransformerDataset(Dataset):
         self.raw_phi = dataset["raw_phi"]
         self.raw_E = dataset["raw_E"]
 
-        self.labels = dataset["truthLabel"]
+        self.truth_labels = dataset["truthLabel"]
+        self.algorithm_labels = dataset["algorithmLabel"]
 
         # Only keep requested split indices
         self.indices = indices
@@ -628,8 +628,11 @@ class ParticleTransformerDataset(Dataset):
             "raw_E":
                 self.raw_E[event_idx],
 
-            "labels":
-                self.labels[event_idx],
+            "truthLabel":
+                self.truth_labels[event_idx],
+
+            "algorithmLabel":
+                self.algorithm_labels[event_idx],
         }
 
 ###########################################################################
@@ -679,10 +682,6 @@ def load_particle_datasets(dataset_name, pt_dir="ptfiles"):
 
     offset = 0
 
-    train_idx = []
-    val_idx = []
-    test_idx = []
-
     for d in datasets:
 
         n_events = d["particles"].shape[0]
@@ -704,6 +703,17 @@ def load_particle_datasets(dataset_name, pt_dir="ptfiles"):
 
     unique, counts = torch.unique(train_labels, return_counts=True)
 
+    print("truthLabels:")
+    for u, c in zip(unique.tolist(), counts.tolist()):
+        print(f"{u}: {c}")
+
+    train_labels = merged["algorithmLabel"][merged["train_idx"]]
+    val_labels   = merged["algorithmLabel"][merged["val_idx"]]
+    test_labels  = merged["algorithmLabel"][merged["test_idx"]]
+
+    unique, counts = torch.unique(train_labels, return_counts=True)
+
+    print("algorithmLabels:")
     for u, c in zip(unique.tolist(), counts.tolist()):
         print(f"{u}: {c}")
     # end debugging
@@ -715,6 +725,62 @@ def load_particle_datasets(dataset_name, pt_dir="ptfiles"):
     return (train_dataset, val_dataset, test_dataset)
 
 ###########################################################################
+# Cross entropy loss (used in pretraining)
+###########################################################################
+
+class PretrainingLoss(nn.Module):
+
+    """
+    Cross entropy against algorithm labels.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+        self.ce = nn.CrossEntropyLoss(ignore_index=-1)
+
+    def forward(
+        self,
+        logits,
+        algorithm_labels,
+        truth_labels,
+        mask,
+    ):
+
+        return self.ce(
+            logits.reshape(-1, NUM_CLASSES),
+            algorithm_labels.reshape(-1),
+        )
+
+###########################################################################
+# Cross entropy loss (used in pretraining)
+###########################################################################
+
+class TwoBodyLoss(nn.Module):
+
+    """
+    Placeholder.
+
+    Eventually this will become the full differentiable
+    event-level physics loss.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(
+        self,
+        logits,
+        algorithm_labels,
+        truth_labels,
+        mask,
+    ):
+
+        raise NotImplementedError(
+            "TwoBodyLoss has not been implemented yet."
+        )
+
+###########################################################################
 # Training utilities
 ###########################################################################
 
@@ -724,6 +790,7 @@ def train_one_epoch(
     optimizer,
     criterion,
     device,
+    trainMode="pretrain",
 ):
     """
     Train for one epoch.
@@ -735,8 +802,6 @@ def train_one_epoch(
 
     total_loss = 0.0
     total_events = 0
-    total_correct = 0.0
-    total_numParticles = 0.0
 
     for batch in loader:
 
@@ -749,7 +814,8 @@ def train_one_epoch(
         raw_phi = batch["raw_phi"].to(device)
         raw_E = batch["raw_E"].to(device)
 
-        labels = batch["labels"].to(device)
+        algorithm_labels = batch["algorithmLabel"].to(device)
+        truth_labels = batch["truthLabel"].to(device)
 
         # Forward pass
         outputs = model(
@@ -766,21 +832,17 @@ def train_one_epoch(
         # Compute loss
         # logits: (B,N,NUM_CLASSES)
 
-        loss = criterion(
-            logits.reshape(-1, NUM_CLASSES),
-            labels.reshape(-1),
-        )
-        
-        # Total accuracy
-        preds = torch.argmax(logits, dim=-1)
-
-        mask = labels != -1
-
-        correct = (preds == labels) & mask
-
-        total_correct += correct.sum().float()
-        
-        total_numParticles += mask.sum().float()
+        if (trainMode == "pretrain"):
+            loss = criterion(
+                logits.reshape(-1, NUM_CLASSES),
+                algorithm_labels.reshape(-1),
+            )
+        else:
+            # todo: find two body loss
+            loss = criterion(
+                logits.reshape(-1, NUM_CLASSES),
+                algorithm_labels.reshape(-1),
+            )
 
         # Backpropagation
         optimizer.zero_grad()
@@ -796,13 +858,14 @@ def train_one_epoch(
 
         total_events += batch_size
 
-    return (total_loss / total_events, total_correct / total_numParticles) 
+    return total_loss / total_events
 
 def validate(
     model,
     loader,
     criterion,
     device,
+    trainMode="pretrain",
 ):
     """
     Evaluate model on validation set.
@@ -812,8 +875,6 @@ def validate(
 
     total_loss = 0.0
     total_events = 0
-    total_correct = 0.0
-    total_numParticles = 0.0
 
     with torch.no_grad():
 
@@ -827,7 +888,8 @@ def validate(
             raw_phi = batch["raw_phi"].to(device)
             raw_E = batch["raw_E"].to(device)
 
-            labels = batch["labels"].to(device)
+            algorithm_labels = batch["algorithmLabel"].to(device)
+            truth_labels = batch["truthLabel"].to(device)
 
             outputs = model(
                 particles,
@@ -840,21 +902,17 @@ def validate(
 
             logits = outputs["logits"]
 
-            loss = criterion(
-                logits.reshape(-1, NUM_CLASSES),
-                labels.reshape(-1),
-            )
-
-            # Total accuracy
-            preds = torch.argmax(logits, dim=-1)
-
-            mask = labels != -1
-
-            correct = (preds == labels) & mask
-
-            total_correct += correct.sum().float()
-            
-            total_numParticles += mask.sum().float()
+            if (trainMode == "pretrain"):
+                loss = criterion(
+                    logits.reshape(-1, NUM_CLASSES),
+                    algorithm_labels.reshape(-1),
+                )
+            else:
+                # todo: find two body loss
+                loss = criterion(
+                    logits.reshape(-1, NUM_CLASSES),
+                    algorithm_labels.reshape(-1),
+                )
 
             batch_size = particles.shape[0]
 
@@ -862,7 +920,37 @@ def validate(
 
             total_events += batch_size
 
-    return (total_loss / total_events, total_correct / total_numParticles)
+    return total_loss / total_events
+
+###########################################################################
+# Build model dependent on mode
+###########################################################################
+
+def build_model(
+    input_dim,
+    trainMode,
+    checkpoint_path,
+):
+    """
+    Construct a ParticleTransformer and optionally
+    load pretrained weights.
+    """
+
+    model = ParticleTransformer(input_dim=input_dim)
+
+    if trainMode == "use_pretrained":
+
+        print(f"Loading checkpoint {checkpoint_path}")
+
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+    return model
 
 ###########################################################################
 # Main training function
@@ -874,6 +962,7 @@ def train(
     batch_size=64,
     learning_rate=1e-4,
     output_path="test_model",
+    trainMode="no_use_pretrained",
 ):
 
     # Device
@@ -912,14 +1001,23 @@ def train(
     input_dim = sample["particles"].shape[-1]
 
     # Model
-    model = ParticleTransformer(input_dim=input_dim)
+    checkpoint_path = ("checkpoints/" + output_path + ".pt")
+
+    model = build_model(
+        input_dim=input_dim,
+        trainMode=trainMode,
+        checkpoint_path=checkpoint_path,
+    )
 
     model = model.to(device)
 
     print("Finished loading model")
 
-    # Loss, ignoring pad
-    criterion = nn.CrossEntropyLoss(ignore_index=-2)
+    # Loss
+    if trainMode == "pretrain":
+        criterion = PretrainingLoss()
+    else:
+        criterion = TwoBodyLoss()
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -932,37 +1030,33 @@ def train(
     best_val_loss = float("inf")
     train_losses = torch.zeros(epochs)
     val_losses = torch.zeros(epochs)
-    train_accs = torch.zeros(epochs)
-    val_accs = torch.zeros(epochs)
 
     for epoch in range(epochs):
-        train_loss, train_acc = train_one_epoch(
+        train_loss = train_one_epoch(
             model,
             train_loader,
             optimizer,
             criterion,
             device,
+            trainMode,
         )
 
-        val_loss, val_acc = validate(
+        val_loss = validate(
             model,
             val_loader,
             criterion,
             device,
+            trainMode,
         )
 
         print(
             f"Epoch {epoch+1}/{epochs} "
             f"| train loss = {train_loss:.5f} "
             f"| val loss = {val_loss:.5f} "
-            f"| train accuracy = {train_acc:.5f} "
-            f"| val accuracy = {val_acc:.5f} "
         )
 
         train_losses[epoch] = train_loss
         val_losses[epoch] = val_loss
-        train_accs[epoch] = train_acc
-        val_accs[epoch] = val_acc
 
         # Save best checkpoint
         if val_loss < best_val_loss:
@@ -984,8 +1078,6 @@ def train(
             "epoch": torch.arange(1, epochs+1),
             "train_loss": train_losses,
             "val_loss": val_losses,
-            "train_acc": train_accs,
-            "val_acc": val_accs,
         },
         "checkpoints/" + output_path + "_losses.pt"
     )
@@ -998,13 +1090,52 @@ def main(args):
 
     Path("checkpoints").mkdir(parents=True, exist_ok=True)
 
-    train(
-        dataset_path=args.input,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        output_path=args.output,
-    )
+    # Assign data modes, pretraining modes
+    if args.dataMode == "all":
+
+        dataset_paths = [
+            args.input + "_all_pf",
+            args.input + "_ak8_constituents",
+            args.input + "_ak4_constituents",
+            args.input + "_all_constituents",
+        ]
+
+        output_paths = [
+            args.output + "_all_pf",
+            args.output + "_ak8_constituents",
+            args.output + "_ak4_constituents",
+            args.output + "_all_constituents",
+        ]
+        
+    else:
+
+        dataset_paths = [args.input + "_" + args.dataMode]
+        output_paths = [args.output + "_" + args.dataMode]
+
+    if args.trainMode == "all":
+
+        trainModes = [
+            "pretrain",
+            "use_pretrained",
+            "no_use_pretrained",
+        ]
+    
+    else:
+
+        trainModes = [args.trainMode]
+
+    for dataset_path, output_path in zip(dataset_paths, output_paths):
+
+        for trainMode in trainModes:
+
+            train(
+                dataset_path=dataset_path,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                learning_rate=args.learning_rate,
+                output_path=output_path,
+                trainMode=trainMode,
+            )
 
 if __name__ == "__main__":
 
@@ -1016,7 +1147,7 @@ if __name__ == "__main__":
         "--input",
         type=str,
         default="WbWb_4000_1000",
-        help="Input preprocessed file",
+        help="Input preprocessed filename stub",
     )
 
     parser.add_argument(
@@ -1048,15 +1179,28 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--mode",
+        "--dataMode",
         choices=[
             "all_pf",
             "ak8_constituents",
             "ak4_constituents",
             "all_constituents",
+            "all",
         ],
         default="all_pf",
-        help="Store all_pf, ak8_constituents, ak4_constituents, all_constituents",
+        help="Train with all_pf, ak8_constituents, ak4_constituents, all_constituents, or all",
+    )
+
+    parser.add_argument(
+        "--trainMode",
+        choices=[
+            "no_use_pretrained",
+            "use_pretrained",
+            "pretrain",
+            "all"
+        ],
+        default="no_use_pretrained",
+        help="Either pretrain, use_pretrained, no_use_pretrained, or all",
     )
 
     args = parser.parse_args()

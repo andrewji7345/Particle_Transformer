@@ -12,8 +12,6 @@ def main(args):
     required_keys = [
         "train_loss",
         "val_loss",
-        "train_acc",
-        "val_acc",
     ]
 
     for key in required_keys:
@@ -22,9 +20,6 @@ def main(args):
 
     train_loss = checkpoint["train_loss"]
     val_loss = checkpoint["val_loss"]
-
-    train_acc = checkpoint["train_acc"]
-    val_acc = checkpoint["val_acc"]
 
     # Create output directory
     output_dir = Path(args.output_dir)
@@ -70,34 +65,10 @@ def main(args):
     ax1.set_ylabel("Loss")
     ax1.grid(True)
 
-    # Accuracy axis
-    ax2 = ax1.twinx()
-
-    acc_train_line, = ax2.plot(
-        epochs,
-        train_acc,
-        linestyle="--",
-        linewidth=2,
-        label="Training Accuracy",
-    )
-
-    acc_val_line, = ax2.plot(
-        epochs,
-        val_acc,
-        linestyle="--",
-        linewidth=2,
-        label="Validation Accuracy",
-    )
-
-    ax2.set_ylabel("Accuracy")
-    ax2.set_ylim(0, 1)
-
     # Combine legends from both axes
     lines = [
         loss_train_line,
         loss_val_line,
-        acc_train_line,
-        acc_val_line,
     ]
 
     lines = [line for line in lines if line is not None]
