@@ -17,7 +17,7 @@ Architecture:
     ParticleClassifier
         ↓
     Per-particle logits:
-        chi0 / chi1 / ISR
+        bkg / chi0 / chi1
 """
 
 import math
@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import argparse
 from pathlib import Path
+from tqdm.auto import tqdm
 
 ###########################################################################
 # Model hyperparameters
@@ -45,12 +46,11 @@ DROPOUT = 0.1
 INTERACTION_DIM = 16
 NUM_CLASSES = 3
 
-LAMBDA_MASS = 2.0
-LAMBDA_ANGLE = 2.0
-LAMBDA_ENTROPY = 0.2
-LAMBDA_OCCUPANCY = 0.2
-LAMBDA_SPLIT = 0.1
-LAMBDA_ISR = 0.5
+LAMBDA_MASS      = 1.0
+LAMBDA_ENTROPY   = 0.2
+LAMBDA_OCCUPANCY = 0.5
+LAMBDA_SPLIT     = 1.0
+LAMBDA_BKG       = 0.5
 
 ###########################################################################
 # Particle embedding
@@ -672,7 +672,6 @@ def load_particle_datasets(dataset_name, pt_dir="ptfiles"):
     datasets = []
 
     for path in shard_paths:
-        print(f"Loading {path}")
         datasets.append(torch.load(path, weights_only=False))
 
     # Keys that should NOT simply be concatenated
@@ -712,28 +711,6 @@ def load_particle_datasets(dataset_name, pt_dir="ptfiles"):
     merged["val_idx"] = torch.cat(val_idx)
     merged["test_idx"] = torch.cat(test_idx)
 
-    # start debugging
-    train_labels = merged["truthLabel"][merged["train_idx"]]
-    val_labels   = merged["truthLabel"][merged["val_idx"]]
-    test_labels  = merged["truthLabel"][merged["test_idx"]]
-
-    unique, counts = torch.unique(train_labels, return_counts=True)
-
-    print("truthLabels:")
-    for u, c in zip(unique.tolist(), counts.tolist()):
-        print(f"{u}: {c}")
-
-    train_labels = merged["algorithmLabel"][merged["train_idx"]]
-    val_labels   = merged["algorithmLabel"][merged["val_idx"]]
-    test_labels  = merged["algorithmLabel"][merged["test_idx"]]
-
-    unique, counts = torch.unique(train_labels, return_counts=True)
-
-    print("algorithmLabels:")
-    for u, c in zip(unique.tolist(), counts.tolist()):
-        print(f"{u}: {c}")
-    # end debugging
-
     train_dataset = ParticleTransformerDataset(merged, merged["train_idx"])
     val_dataset = ParticleTransformerDataset(merged, merged["val_idx"])
     test_dataset = ParticleTransformerDataset(merged, merged["test_idx"])
@@ -753,7 +730,7 @@ class PretrainingLoss(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.ce = nn.CrossEntropyLoss(ignore_index=-1)
+        self.ce = nn.CrossEntropyLoss(ignore_index=-1, reduction="none")
 
     def forward(
         self,
@@ -761,10 +738,25 @@ class PretrainingLoss(nn.Module):
         algorithm_labels,
     ):
 
-        return self.ce(
+        B, N = algorithm_labels.shape
+
+        particle_loss = self.ce(
             logits.reshape(-1, NUM_CLASSES),
             algorithm_labels.reshape(-1),
-        )
+        ).reshape(B, N)
+
+        valid_mask = (algorithm_labels != -1)
+
+        event_loss = (
+            particle_loss * valid_mask
+        ).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
+
+        loss = event_loss.mean()
+
+        return {
+            "loss": loss,
+            "event_loss": event_loss,
+        }
 
 ###########################################################################
 # Two-body loss (used in final training)
@@ -775,7 +767,7 @@ class TwoBodyLoss(nn.Module):
     """
     Differentiable event-level reconstruction loss.
 
-    L = L_angle + L_mass + L_entropy + L_split + L_occupancy + L_isr_anisotropy
+    L = L_mass + L_entropy + L_split + L_occupancy + L_bkg_anisotropy
     """
 
     def __init__(self):
@@ -803,9 +795,9 @@ class TwoBodyLoss(nn.Module):
         pz = raw_pt * torch.sinh(raw_eta)
 
         # Predicted probabilities
-        p_chi0 = probabilities[...,0] * mask
-        p_chi1 = probabilities[...,1] * mask
-        p_isr  = probabilities[...,2] * mask
+        p_bkg  = probabilities[...,0] * mask
+        p_chi0 = probabilities[...,1] * mask
+        p_chi1 = probabilities[...,2] * mask
 
         # Reconstructed chi four-vectors
         chi0_px = torch.sum(p_chi0 * px, dim=1)
@@ -818,12 +810,12 @@ class TwoBodyLoss(nn.Module):
         chi1_pz = torch.sum(p_chi1 * pz, dim=1)
         chi1_E  = torch.sum(p_chi1 * raw_E, dim=1)
 
-        # Reconstructed ISR four-vector
+        # Reconstructed bkg four-vector
 
-        isr_px = torch.sum(p_isr * px, dim=1)
-        isr_py = torch.sum(p_isr * py, dim=1)
-        isr_pz = torch.sum(p_isr * pz, dim=1)
-        isr_E  = torch.sum(p_isr * raw_E, dim=1)
+        bkg_px = torch.sum(p_bkg * px, dim=1)
+        bkg_py = torch.sum(p_bkg * py, dim=1)
+        bkg_pz = torch.sum(p_bkg * pz, dim=1)
+        bkg_E  = torch.sum(p_bkg * raw_E, dim=1)
 
         # Chi masses
         chi0_mass2 = (
@@ -843,129 +835,108 @@ class TwoBodyLoss(nn.Module):
         chi0_mass = torch.sqrt(torch.clamp(chi0_mass2, min=0.))
         chi1_mass = torch.sqrt(torch.clamp(chi1_mass2, min=0.))
 
-        # Boost into reconstructed chi-chi COM frame
-        pair_px = chi0_px + chi1_px
-        pair_py = chi0_py + chi1_py
-        pair_pz = chi0_pz + chi1_pz
-        pair_E  = chi0_E  + chi1_E
-
-        beta_x = pair_px / (pair_E + eps)
-        beta_y = pair_py / (pair_E + eps)
-        beta_z = pair_pz / (pair_E + eps)
-
-        beta2 = beta_x**2 + beta_y**2 + beta_z**2
-        beta2 = torch.clamp(beta2, max=0.999999)
-
-        gamma = 1.0 / torch.sqrt(1.0 - beta2)
-
-        def boost(px, py, pz, E):
-
-            bp = (
-                beta_x * px +
-                beta_y * py +
-                beta_z * pz
-            )
-
-            gamma2 = (gamma - 1.0) / (beta2 + eps)
-
-            px_new = px + gamma2 * bp * beta_x - gamma * beta_x * E
-            py_new = py + gamma2 * bp * beta_y - gamma * beta_y * E
-            pz_new = pz + gamma2 * bp * beta_z - gamma * beta_z * E
-
-            return px_new, py_new, pz_new
-
-        chi0_px_b, chi0_py_b, chi0_pz_b = boost(chi0_px, chi0_py, chi0_pz, chi0_E)
-        chi1_px_b, chi1_py_b, chi1_pz_b = boost(chi1_px, chi1_py, chi1_pz, chi1_E)
-
         # Equal mass loss
+        # L_mass = |m_chi0 - m_chi1| / (m_chi0 + m_chi1)
         mass_loss = (torch.abs(chi0_mass - chi1_mass) / (chi0_mass + chi1_mass + eps))
 
-        # Back-to-back angle loss
-        dot = (chi0_px_b * chi1_px_b + chi0_py_b * chi1_py_b + chi0_pz_b * chi1_pz_b)
-
-        mag0 = torch.sqrt(chi0_px_b**2 + chi0_py_b**2 + chi0_pz_b**2 + eps)
-        mag1 = torch.sqrt( chi1_px_b**2 + chi1_py_b**2 + chi1_pz_b**2 + eps)
-
-        cos_theta = dot / (mag0 * mag1)
-
-        angle_loss = 1.0 + cos_theta
-
         # Entropy loss
+        # L_entropy = - (1/n_particles) Sum (p ln(p))
         entropy = -torch.sum(probabilities * torch.log(probabilities + eps), dim=-1)
 
         entropy_loss = (entropy * mask).sum(dim=1) / (mask.sum(dim=1) + eps)
 
         # Energy occupancy loss
-        chi0_energy = torch.sum(p_chi0 * raw_E, dim=1)
-        chi1_energy = torch.sum(p_chi1 * raw_E, dim=1)
+        # L_occupancy = |E_chi0 - E_chi1| / (E_chi0 + E_chi1)
+        occupancy_loss = (torch.abs(chi0_E - chi1_E) / (chi0_E + chi1_E + eps))
 
-        occupancy_loss = (torch.abs(chi0_energy - chi1_energy) / (chi0_energy + chi1_energy + eps))
+        # Jet splitting loss
+        # L_split = 1 - 1/(n_particles^2) |p|^2
+        # Equivalent to average pairwise agreement between CA8 jet constituents
+        B, N, _ = probabilities.shape
+        device = probabilities.device
 
-        # 5. Jet coherence penalty
-        split_loss = torch.zeros(probabilities.shape[0], device=probabilities.device)
+        # Ignore bkg probabilities
+        probs = probabilities[..., :2]
+        labels = algorithm_CA8labels
 
-        B = probabilities.shape[0]
+        # Flatten particle dimension
+        flat_probs = probs.reshape(-1, 2)
+        flat_labels = labels.reshape(-1)
 
-        for b in range(B):
+        # Event index for every particle
+        event_ids = torch.arange(B, device=device).repeat_interleave(N)
 
-            labels = algorithm_CA8labels[b]
+        # Remove padded particles & particles not in a CA8 jet
+        valid = flat_labels >= 0
 
-            probs = probabilities[b]
+        flat_probs = flat_probs[valid]
+        flat_labels = flat_labels[valid]
+        event_ids = event_ids[valid]
 
-            valid_labels = labels[labels >= 0].unique()
+        # Build globally unique jet indices
+        max_jets = int(labels.max().item()) + 1
+        global_jets = event_ids * max_jets + flat_labels
 
-            event_loss = 0.0
-            n_jets = 0
+        num_global_jets = B * max_jets
 
-            for jet in valid_labels:
+        # Sum probabilities for each jet
+        jet_sum = torch.zeros(num_global_jets, 2, device=device)
+        jet_sum.index_add_(0, global_jets, flat_probs)
 
-                jet_mask = labels == jet
+        # Number of particles in each jet
+        jet_count = torch.zeros(num_global_jets, device=device)
+        jet_count.index_add_(0, global_jets, torch.ones_like(global_jets, dtype=torch.float))
 
-                # Ignore jets with fewer than two particles
-                if jet_mask.sum() < 2:
-                    continue
+        # Mean assignment vector for each jet
+        jet_mean = jet_sum / jet_count.clamp(min=1).unsqueeze(1)
 
-                # Ignore ISR component
-                jet_probs = probs[jet_mask, :2]
+        # 1 - ||mean||^2
+        jet_loss = 1.0 - (jet_mean ** 2).sum(dim=1)
 
-                # Average assignment vector for this jet
-                jet_mean = jet_probs.mean(dim=0, keepdim=True)
+        # Ignore jets with fewer than two particles
+        valid_jets = jet_count >= 2
 
-                # Cosine similarity between every particle and jet-average assignment
-                cosine = F.cosine_similarity(
-                    jet_probs,
-                    jet_mean.expand_as(jet_probs),
-                    dim=1,
-                    eps=eps,
-                )
+        # Event index for every global jet
+        jet_events = torch.arange(num_global_jets, device=device) // max_jets
 
-                event_loss += (1.0 - cosine).mean()
+        split_loss = torch.zeros(B, device=device)
 
-                n_jets += 1
+        split_loss.index_add_(0, jet_events[valid_jets], jet_loss[valid_jets])
 
-            if n_jets > 0:
-                split_loss[b] = event_loss / n_jets
+        jets_per_event = torch.zeros(B, device=device)
+        jets_per_event.index_add_(0, jet_events[valid_jets], torch.ones_like(jet_events[valid_jets], dtype=torch.float))
 
-        # ISR anisotropy loss
-        isr_vector = torch.sqrt(isr_px**2 + isr_py**2 + isr_pz**2 + eps)
+        split_loss = split_loss / jets_per_event.clamp(min=1)
+
+        # bkg anisotropy loss
+        bkg_vector = torch.sqrt(bkg_px**2 + bkg_py**2 + bkg_pz**2 + eps)
 
         particle_p = torch.sqrt(px**2 + py**2 + pz**2 + eps)
 
-        isr_scalar = torch.sum(p_isr * particle_p, dim=1)
+        bkg_scalar = torch.sum(p_bkg * particle_p, dim=1)
 
-        isr_loss = isr_vector / (isr_scalar + eps)
+        bkg_loss = bkg_vector / (bkg_scalar + eps)
 
         # Combine
-        loss = (
+        event_loss = (
             LAMBDA_MASS * mass_loss
-            + LAMBDA_ANGLE * angle_loss
             + LAMBDA_ENTROPY * entropy_loss
             + LAMBDA_OCCUPANCY * occupancy_loss
             + LAMBDA_SPLIT * split_loss
-            + LAMBDA_ISR * isr_loss
+            + LAMBDA_BKG * bkg_loss
         )
 
-        return loss.mean()
+        losses = {
+            "event_loss":     event_loss,
+            "loss":           event_loss.mean(),
+            "mass_loss":      (LAMBDA_MASS * mass_loss).mean(),
+            "entropy_loss":   (LAMBDA_ENTROPY * entropy_loss).mean(),
+            "occupancy_loss": (LAMBDA_OCCUPANCY * occupancy_loss).mean(),
+            "split_loss":     (LAMBDA_SPLIT * split_loss).mean(),
+            "bkg_loss":       (LAMBDA_BKG * bkg_loss).mean(),
+        }
+
+        return losses
 
 ###########################################################################
 # Training utilities
@@ -978,6 +949,8 @@ def train_one_epoch(
     criterion,
     device,
     trainMode="pretrain",
+    epoch=None,
+    num_epochs=None,
 ):
     """
     Train for one epoch.
@@ -987,10 +960,22 @@ def train_one_epoch(
 
     model.train()
 
-    total_loss = 0.0
+    total_losses = {}
     total_events = 0
 
-    for batch in loader:
+    if epoch is not None and num_epochs is not None:
+        desc = f"Epoch {epoch+1}/{num_epochs}"
+    else:
+        desc = "Training"
+
+    pbar = tqdm(
+        loader,
+        desc=desc,
+        leave=False,
+        dynamic_ncols=True,
+    )
+
+    for batch in pbar:
 
         # Move tensors to device
         particles = batch["particles"].to(device)
@@ -1001,7 +986,6 @@ def train_one_epoch(
         raw_phi = batch["raw_phi"].to(device)
         raw_E = batch["raw_E"].to(device)
 
-        truth_labels = batch["truthLabel"].to(device)
         algorithm_labels = batch["algorithmLabel"].to(device)
         algorithm_CA8labels = batch["algorithmCA8Label"].to(device)
 
@@ -1022,12 +1006,12 @@ def train_one_epoch(
         # logits: (B,N,NUM_CLASSES)
 
         if trainMode == "pretrain":
-            loss = criterion(
-                logits.reshape(-1, NUM_CLASSES),
-                algorithm_labels.reshape(-1),
+            losses = criterion(
+                logits,
+                algorithm_labels,
             )
         else:
-            loss = criterion(
+            losses = criterion(
                 probabilities,
                 raw_pt,
                 raw_eta,
@@ -1040,18 +1024,32 @@ def train_one_epoch(
         # Backpropagation
         optimizer.zero_grad()
 
-        loss.backward()
+        losses["loss"].backward()
 
         optimizer.step()
 
         # Accumulate statistics
         batch_size = particles.shape[0]
 
-        total_loss += loss.item() * batch_size
+        for key in losses:
+            if key not in total_losses:
+                total_losses[key] = losses[key].sum().item()
+            else:
+                total_losses[key] += losses[key].sum().item()
 
         total_events += batch_size
 
-    return total_loss / total_events
+        postfix = {}
+
+        for key in losses:
+            postfix[key] = f"{losses[key].sum().item():.3f}"
+
+        pbar.set_postfix(postfix)
+
+    for key in total_losses:
+        total_losses[key] /= total_events
+
+    return total_losses
 
 def validate(
     model,
@@ -1059,6 +1057,8 @@ def validate(
     criterion,
     device,
     trainMode="pretrain",
+    epoch=None,
+    num_epochs=None,
 ):
     """
     Evaluate model on validation set.
@@ -1066,12 +1066,24 @@ def validate(
 
     model.eval()
 
-    total_loss = 0.0
+    total_losses = {}
     total_events = 0
 
     with torch.no_grad():
 
-        for batch in loader:
+        if epoch is not None and num_epochs is not None:
+            desc = f"Epoch {epoch+1}/{num_epochs}"
+        else:
+            desc = "Training"
+
+        pbar = tqdm(
+            loader,
+            desc=desc,
+            leave=False,
+            dynamic_ncols=True,
+        )
+
+        for batch in pbar:
 
             particles = batch["particles"].to(device)
             mask = batch["mask"].to(device)
@@ -1081,7 +1093,6 @@ def validate(
             raw_phi = batch["raw_phi"].to(device)
             raw_E = batch["raw_E"].to(device)
 
-            truth_labels = batch["truthLabel"].to(device)
             algorithm_labels = batch["algorithmLabel"].to(device)
             algorithm_CA8labels = batch["algorithmCA8Label"].to(device)
 
@@ -1098,28 +1109,42 @@ def validate(
             probabilities = outputs["probabilities"]
 
             if trainMode == "pretrain":
-                loss = criterion(
-                    logits.reshape(-1, NUM_CLASSES),
-                    algorithm_labels.reshape(-1),
+                losses = criterion(
+                    logits,
+                    algorithm_labels,
                 )
             else:
-                loss = criterion(
+                losses = criterion(
                     probabilities,
                     raw_pt,
                     raw_eta,
                     raw_phi,
                     raw_E,
-                    truth_labels,
+                    algorithm_CA8labels,
                     mask,
                 )
 
             batch_size = particles.shape[0]
 
-            total_loss += loss.item() * batch_size
+            for key in losses:
+                if key not in total_losses:
+                    total_losses[key] = losses[key].sum().item()
+                else:
+                    total_losses[key] += losses[key].sum().item()
 
             total_events += batch_size
 
-    return total_loss / total_events
+            postfix = {}
+
+            for key in losses:
+                postfix[key] = f"{losses[key].sum().item():.3f}"
+
+            pbar.set_postfix(postfix)
+
+        for key in total_losses:
+            total_losses[key] /= total_events
+
+    return total_losses
 
 ###########################################################################
 # Build model dependent on mode
@@ -1218,6 +1243,8 @@ def train(
 
     model = model.to(device)
 
+    model = torch.compile(model)
+
     print("Finished loading model")
 
     # Loss
@@ -1235,45 +1262,54 @@ def train(
 
     # Training loop
     best_val_loss = float("inf")
-    train_losses = torch.zeros(epochs)
-    val_losses = torch.zeros(epochs)
+    all_train_losses = [None] * epochs
+    all_val_losses = [None] * epochs
 
     for epoch in range(epochs):
-        train_loss = train_one_epoch(
+        train_losses = train_one_epoch(
             model,
             train_loader,
             optimizer,
             criterion,
             device,
             trainMode,
+            epoch,
+            epochs,
         )
 
-        val_loss = validate(
+        val_losses = validate(
             model,
             val_loader,
             criterion,
             device,
             trainMode,
+            epoch,
+            epochs,
         )
 
         print(
             f"Epoch {epoch+1}/{epochs} "
-            f"| train loss = {train_loss:.5f} "
-            f"| val loss = {val_loss:.5f} "
+            f"| train loss = {train_losses["loss"]:.5f} "
+            f"| val loss = {val_losses["loss"]:.5f} "
         )
 
-        train_losses[epoch] = train_loss
-        val_losses[epoch] = val_loss
+        all_train_losses[epoch] = train_losses
+        all_val_losses[epoch] = val_losses
 
         # Save best checkpoint
-        if val_loss < best_val_loss:
+        if val_losses["loss"] < best_val_loss:
 
-            best_val_loss = val_loss
+            best_val_loss = val_losses["loss"]
 
-            torch.save(
-                {
+            state_dict = (
+                model._orig_mod.state_dict()
+                if hasattr(model, "_orig_mod")
+                else model.state_dict()
+            )
+
+            torch.save({
                     "state_epoch": epoch,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": state_dict,
                     "optimizer_state_dict": optimizer.state_dict(),
                 },
                 "checkpoints/" + output_path + ".pt",
@@ -1283,8 +1319,8 @@ def train(
     torch.save(
         {
             "epoch": torch.arange(1, epochs+1),
-            "train_loss": train_losses,
-            "val_loss": val_losses,
+            "train_loss": all_train_losses,
+            "val_loss": all_val_losses,
         },
         "checkpoints/" + output_path + "_losses.pt"
     )
@@ -1321,6 +1357,12 @@ def main(args):
             })
 
     for job in jobs:
+        
+        print("------------------Train------------------")
+        print("Dataset path: " + job["dataset_path"])
+        print("Output path: " + job["output_path"])
+        print("Train mode: " + job["trainMode"])
+
         train(
             dataset_path=job["dataset_path"],
             epochs=args.epochs,
@@ -1346,14 +1388,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--epochs",
         type=int,
-        default=5,
+        default=10,
         help="Number of training epochs",
     )
 
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=64,
+        default=128,
         help="Mini-batch size",
     )
 
@@ -1380,7 +1422,7 @@ if __name__ == "__main__":
             "all_constituents",
             "all",
         ],
-        default="all_pf",
+        default="ak8_constituents",
         help="Train with all_pf, ak8_constituents, ak4_constituents, all_constituents, or all",
     )
 
