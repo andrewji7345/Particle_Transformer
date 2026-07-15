@@ -33,18 +33,21 @@ from tqdm.auto import tqdm
 # Model hyperparameters
 ###########################################################################
 
-EMBED_DIM = 128
+EMBED_DIM = 96
 
-NUM_HEADS = 8
-HEAD_DIM = EMBED_DIM // NUM_HEADS
+NUM_HEADS = 6
+HEAD_DIM = 16
 
-NUM_LAYERS = 8
+NUM_LAYERS = 4
 
 MLP_RATIO = 4
+
 DROPOUT = 0.1
 
 INTERACTION_DIM = 16
 NUM_CLASSES = 3
+
+FRAC_OCCUPANCY = 0.1
 
 LAMBDA_MASS      = 1.0
 LAMBDA_ENTROPY   = 0.2
@@ -740,9 +743,18 @@ class PretrainingLoss(nn.Module):
 
         B, N = algorithm_labels.shape
 
+        swapped_labels = algorithm_labels.clone()
+        swapped_labels[algorithm_labels == 1] = 2
+        swapped_labels[algorithm_labels == 2] = 1
+
         particle_loss = self.ce(
             logits.reshape(-1, NUM_CLASSES),
             algorithm_labels.reshape(-1),
+        ).reshape(B, N)
+
+        swapped_particle_loss = self.ce(
+            logits.reshape(-1, NUM_CLASSES),
+            swapped_labels.reshape(-1),
         ).reshape(B, N)
 
         valid_mask = (algorithm_labels != -1)
@@ -750,6 +762,12 @@ class PretrainingLoss(nn.Module):
         event_loss = (
             particle_loss * valid_mask
         ).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
+
+        swapped_event_loss = (
+            swapped_particle_loss * valid_mask
+        ).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
+
+        event_loss = torch.minimum(event_loss, swapped_event_loss)
 
         loss = event_loss.mean()
 
@@ -759,7 +777,7 @@ class PretrainingLoss(nn.Module):
         }
 
 ###########################################################################
-# Two-body loss (used in final training)
+# Two-body loss
 ###########################################################################
 
 class TwoBodyLoss(nn.Module):
@@ -845,18 +863,14 @@ class TwoBodyLoss(nn.Module):
 
         entropy_loss = (entropy * mask).sum(dim=1) / (mask.sum(dim=1) + eps)
 
-        # Energy occupancy loss
-        # L_occupancy = |E_chi0 - E_chi1| / (E_chi0 + E_chi1)
-        occupancy_loss = (torch.abs(chi0_E - chi1_E) / (chi0_E + chi1_E + eps))
-
         # Jet splitting loss
         # L_split = 1 - 1/(n_particles^2) |p|^2
         # Equivalent to average pairwise agreement between CA8 jet constituents
         B, N, _ = probabilities.shape
         device = probabilities.device
 
-        # Ignore bkg probabilities
-        probs = probabilities[..., :2]
+        # Ignore bkg label
+        probs = probabilities[..., 1:]
         labels = algorithm_CA8labels
 
         # Flatten particle dimension
@@ -908,6 +922,17 @@ class TwoBodyLoss(nn.Module):
 
         split_loss = split_loss / jets_per_event.clamp(min=1)
 
+        # occupancy loss
+        # L_occupancy = e^(-N_chi0 / N_occupancy) + e^(-N_chi1 / N_occupancy)
+        valid_particles = mask.sum(dim=1)
+
+        n_occupancy = FRAC_OCCUPANCY * valid_particles.clamp(min=1)
+
+        chi0_occ = p_chi0.sum(dim=1)
+        chi1_occ = p_chi1.sum(dim=1)
+
+        occupancy_loss = (torch.exp(-chi0_occ / (n_occupancy + eps)) + torch.exp(-chi1_occ / (n_occupancy + eps)))
+
         # bkg anisotropy loss
         bkg_vector = torch.sqrt(bkg_px**2 + bkg_py**2 + bkg_pz**2 + eps)
 
@@ -921,8 +946,8 @@ class TwoBodyLoss(nn.Module):
         event_loss = (
             LAMBDA_MASS * mass_loss
             + LAMBDA_ENTROPY * entropy_loss
-            + LAMBDA_OCCUPANCY * occupancy_loss
             + LAMBDA_SPLIT * split_loss
+            + LAMBDA_OCCUPANCY * occupancy_loss
             + LAMBDA_BKG * bkg_loss
         )
 
@@ -931,9 +956,102 @@ class TwoBodyLoss(nn.Module):
             "loss":           event_loss.mean(),
             "mass_loss":      (LAMBDA_MASS * mass_loss).mean(),
             "entropy_loss":   (LAMBDA_ENTROPY * entropy_loss).mean(),
-            "occupancy_loss": (LAMBDA_OCCUPANCY * occupancy_loss).mean(),
             "split_loss":     (LAMBDA_SPLIT * split_loss).mean(),
+            "occupancy_loss":     (LAMBDA_OCCUPANCY * occupancy_loss).mean(),
             "bkg_loss":       (LAMBDA_BKG * bkg_loss).mean(),
+        }
+
+        return losses
+    
+###########################################################################
+# Get loss weights if using combined loss
+###########################################################################
+    
+def get_loss_weights(epoch, num_epochs):
+    """
+    Smoothly transition from CE pretraining to two-body optimization.
+
+    Epoch 0:
+        CE = 1.0
+        TwoBody = 0.0
+
+    Final epoch:
+        CE = 0.1
+        TwoBody = 1.0
+    """
+
+    transition_epochs = max(1, int(0.4 * num_epochs))
+
+    progress = min(epoch / transition_epochs, 1.0)
+
+    ce_weight = 1.0 - 0.9 * progress
+    twobody_weight = progress
+
+    return ce_weight, twobody_weight
+
+###########################################################################
+# Combined loss
+###########################################################################
+
+class CombinedLoss(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.ce_loss = PretrainingLoss()
+        self.two_body_loss = TwoBodyLoss()
+
+    def forward(
+        self,
+        epoch,
+        num_epochs,
+        logits,
+        probabilities,
+        raw_pt,
+        raw_eta,
+        raw_phi,
+        raw_E,
+        algorithm_labels,
+        algorithm_CA8labels,
+        mask,
+    ):
+
+        ce_losses = self.ce_loss(
+            logits,
+            algorithm_labels,
+        )
+
+        twobody_losses = self.two_body_loss(
+            probabilities,
+            raw_pt,
+            raw_eta,
+            raw_phi,
+            raw_E,
+            algorithm_CA8labels,
+            mask,
+        )
+
+        ce_weight, twobody_weight = get_loss_weights(epoch, num_epochs)
+
+        loss = (ce_weight * ce_losses["loss"] + twobody_weight * twobody_losses["loss"])
+
+        losses = {
+            "loss": loss,
+
+            "ce_loss": ce_losses["loss"],
+            "twobody_loss": twobody_losses["loss"],
+
+            "ce_weight": ce_weight,
+            "twobody_weight": twobody_weight,
+
+            "event_loss": ce_weight * ce_losses["event_loss"] + twobody_weight * twobody_losses["event_loss"],
+
+            "mass_loss": twobody_losses["mass_loss"],
+            "entropy_loss": twobody_losses["entropy_loss"],
+            "split_loss": twobody_losses["split_loss"],
+            "occupancy_loss": twobody_losses["occupancy_loss"],
+            "bkg_loss": twobody_losses["bkg_loss"],
         }
 
         return losses
@@ -1010,6 +1128,20 @@ def train_one_epoch(
                 logits,
                 algorithm_labels,
             )
+        elif trainMode == "combined":
+            losses = criterion(
+                epoch,
+                num_epochs,
+                logits,
+                probabilities,
+                raw_pt,
+                raw_eta,
+                raw_phi,
+                raw_E,
+                algorithm_labels,
+                algorithm_CA8labels,
+                mask,
+            )
         else:
             losses = criterion(
                 probabilities,
@@ -1031,22 +1163,32 @@ def train_one_epoch(
         # Accumulate statistics
         batch_size = particles.shape[0]
 
-        for key in losses:
-            if key not in total_losses:
-                total_losses[key] = losses[key].sum().item()
+        for key, value in losses.items():
+
+            # Skip non-tensor metadata
+            if "weight" in key:
+                total_losses[key] = value
+                continue
+
+            # Per-event vector
+            if value.ndim > 0:
+                continue
+
+            # Scalar already averaged over batch
             else:
-                total_losses[key] += losses[key].sum().item()
+                total_losses[key] = total_losses.get(key, 0.0) + value.item() * batch_size
 
         total_events += batch_size
 
-        postfix = {}
-
-        for key in losses:
-            postfix[key] = f"{losses[key].sum().item():.3f}"
+        postfix = {"loss": f"{losses["loss"].item():.3f}"}
 
         pbar.set_postfix(postfix)
 
     for key in total_losses:
+
+        if "weight" in key or key == "event_loss":
+            continue
+
         total_losses[key] /= total_events
 
     return total_losses
@@ -1113,6 +1255,20 @@ def validate(
                     logits,
                     algorithm_labels,
                 )
+            elif trainMode == "combined":
+                losses = criterion(
+                    epoch,
+                    num_epochs,
+                    logits,
+                    probabilities,
+                    raw_pt,
+                    raw_eta,
+                    raw_phi,
+                    raw_E,
+                    algorithm_labels,
+                    algorithm_CA8labels,
+                    mask,
+                )
             else:
                 losses = criterion(
                     probabilities,
@@ -1126,22 +1282,29 @@ def validate(
 
             batch_size = particles.shape[0]
 
-            for key in losses:
-                if key not in total_losses:
-                    total_losses[key] = losses[key].sum().item()
+            for key, value in losses.items():
+
+                if "weight" in key:
+                    total_losses[key] = value
+                    continue
+
+                if value.ndim > 0:
+                    continue
+
                 else:
-                    total_losses[key] += losses[key].sum().item()
+                    total_losses[key] = total_losses.get(key, 0.0) + value.item() * batch_size
 
             total_events += batch_size
 
-            postfix = {}
-
-            for key in losses:
-                postfix[key] = f"{losses[key].sum().item():.3f}"
+            postfix = {"loss": f"{losses["loss"].item():.3f}"}
 
             pbar.set_postfix(postfix)
 
         for key in total_losses:
+
+            if "weight" in key or key == "event_loss":
+                continue
+
             total_losses[key] /= total_events
 
     return total_losses
@@ -1162,7 +1325,7 @@ def build_model(
 
     model = ParticleTransformer(input_dim=input_dim)
 
-    if trainMode == "use_pretrained":
+    if trainMode == "use_pretrained" or trainMode == "combined":
 
         print(f"Loading checkpoint {checkpoint_path}")
 
@@ -1232,6 +1395,11 @@ def train(
             "_use_pretrained",
             "_pretrain",
         )
+    elif trainMode == "combined":
+        checkpoint_path = tmp_path.replace(
+            "_combined",
+            "_pretrain",
+        )
     else:
         checkpoint_path = tmp_path
 
@@ -1250,6 +1418,8 @@ def train(
     # Loss
     if trainMode == "pretrain":
         criterion = PretrainingLoss()
+    elif trainMode == "combined":
+        criterion = CombinedLoss()
     else:
         criterion = TwoBodyLoss()
 
@@ -1289,8 +1459,8 @@ def train(
 
         print(
             f"Epoch {epoch+1}/{epochs} "
-            f"| train loss = {train_losses["loss"]:.5f} "
-            f"| val loss = {val_losses["loss"]:.5f} "
+            f"| train loss = {train_losses["loss"]:.3f} "
+            f"| val loss = {val_losses["loss"]:.3f} "
         )
 
         all_train_losses[epoch] = train_losses
@@ -1341,7 +1511,7 @@ def main(args):
     )
 
     trainModes = (
-        ["pretrain", "use_pretrained", "no_use_pretrained"]
+        ["pretrain", "use_pretrained", "no_use_pretrained", "combined"]
         if args.trainMode == "all"
         else [args.trainMode]
     )
@@ -1432,10 +1602,11 @@ if __name__ == "__main__":
             "no_use_pretrained",
             "use_pretrained",
             "pretrain",
+            "combined",
             "all"
         ],
         default="no_use_pretrained",
-        help="Either pretrain, use_pretrained, no_use_pretrained, or all",
+        help="Either pretrain, use_pretrained, no_use_pretrained, combined, or all",
     )
 
     args = parser.parse_args()

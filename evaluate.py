@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from torchinfo import summary
 
-from train import load_particle_datasets, PretrainingLoss, TwoBodyLoss, build_model
+from train import load_particle_datasets, PretrainingLoss, TwoBodyLoss, CombinedLoss, build_model
 
 ###########################################################################
 # Model hyperparameters
@@ -33,6 +33,8 @@ DROPOUT = 0.1
 
 INTERACTION_DIM = 16
 NUM_CLASSES = 3
+
+FRAC_OCCUPANCY = 0.1
 
 LAMBDA_MASS      = 1.0
 LAMBDA_ENTROPY   = 0.2
@@ -112,6 +114,8 @@ def plot_losses(
     
     colors = {
         "loss":           "black",
+        "ce_loss":        "tab:brown",
+        "twobody_loss":   "tab:olive",
         "mass_loss":      "tab:blue",
         "entropy_loss":   "tab:red",
         "occupancy_loss": "tab:green",
@@ -129,7 +133,7 @@ def plot_losses(
     
     for loss_name in loss_names:
 
-        if loss_name == "event_loss": continue;
+        if loss_name == "event_loss" or "loss" not in loss_name: continue;
 
         train_curve = [x[loss_name] for x in loss_history["train_loss"]]
         val_curve   = [x[loss_name] for x in loss_history["val_loss"]]
@@ -160,7 +164,7 @@ def plot_losses(
         plt.tight_layout()
 
         plt.savefig(
-            f"plots/{output_path}_{loss_name}.png",
+            f"plots/{output_path}_loss_{loss_name}.png",
             dpi=200,
         )
 
@@ -170,7 +174,7 @@ def plot_losses(
 
     for loss_name in loss_names:
 
-        if loss_name == "event_loss": continue;
+        if loss_name == "event_loss" or "loss" not in loss_name: continue;
 
         train_curve = [x[loss_name] for x in loss_history["train_loss"]]
         val_curve   = [x[loss_name] for x in loss_history["val_loss"]]
@@ -199,11 +203,32 @@ def plot_losses(
     plt.tight_layout()
 
     plt.savefig(
-        f"plots/{output_path}_all_losses.png",
+        f"plots/{output_path}_loss_all_losses.png",
         dpi=200,
     )
 
     plt.close()
+
+###########################################################################
+# Confusion matrix helper
+###########################################################################
+
+def best_permutation(reference, labels):
+
+    # Original
+    score_original = np.sum(reference == labels)
+
+    # Swap 1 <-> 2
+    swapped = labels.copy()
+    swapped[labels == 1] = 2
+    swapped[labels == 2] = 1
+
+    score_swapped = np.sum(reference == swapped)
+
+    if score_swapped > score_original:
+        return swapped
+    else:
+        return labels
 
 ###########################################################################
 # Plot confusion matrices
@@ -214,38 +239,44 @@ def plot_confusion_matrices(
     output_path="test_model",
 ):
     
-    mask            = test_metrics["data"]["mask"].numpy()
+    mask             = test_metrics["data"]["mask"].numpy()
 
-    algorithmlabels = test_metrics["data"]["algorithmlabels"][mask].numpy()
-    truthlabels     = test_metrics["data"]["truthlabels"][mask].numpy()
-    preds           = test_metrics["data"]["predictions"][mask].numpy()
+    algorlabels      = test_metrics["data"]["algorithmlabels"][mask].numpy()
+    truthlabels      = test_metrics["data"]["truthlabels"][mask].numpy()
+    translabels      = test_metrics["data"]["predictions"][mask].numpy()
     
-    algoconfusion = torch.zeros(3,3,dtype=torch.int64)
-    tranconfusion = torch.zeros(3,3,dtype=torch.int64)
-    compconfusion = torch.zeros(3,3,dtype=torch.int64)
+    # Get best permutation of labels by aligning with truth convention
+    algorlabels_best_against_truthlabels = best_permutation(truthlabels, algorlabels)
+    truthlabels_best_against_translabels = best_permutation(translabels, truthlabels)
+    translabels_best_against_algorlabels = best_permutation(algorlabels, translabels)
 
-    for truthlabel, pred in zip(truthlabels, preds):
-        tranconfusion[truthlabel, pred] += 1
-    
-    for truthlabel, algorithmlabel in zip(truthlabels, algorithmlabels):
-        algoconfusion[truthlabel, algorithmlabel] += 1
+    algorvstruthconfusion = torch.zeros(3,3,dtype=torch.int64)
+    truthvstransconfusion = torch.zeros(3,3,dtype=torch.int64)
+    transvsalgorconfusion = torch.zeros(3,3,dtype=torch.int64)
 
-    for algorithmlabel, pred in zip(algorithmlabels, preds):
-        compconfusion[algorithmlabel, pred] += 1
+    for algorlabel, truthlabel in zip(algorlabels_best_against_truthlabels, truthlabels):
+        algorvstruthconfusion[algorlabel, truthlabel] += 1
 
-    tranconfusion = tranconfusion.float()
-    algoconfusion = algoconfusion.float()
-    compconfusion = compconfusion.float()
+    for truthlabel, translabel in zip(truthlabels_best_against_translabels, translabels):
+        truthvstransconfusion[truthlabel, translabel] += 1
 
-    tranconfusion /= (tranconfusion.sum(dim=1,keepdim=True) + 1e-8)
-    algoconfusion /= (algoconfusion.sum(dim=1,keepdim=True) + 1e-8)
-    compconfusion /= (compconfusion.sum(dim=1,keepdim=True) + 1e-8)
+    for translabel, algorlabel in zip(translabels_best_against_algorlabels, algorlabels):
+        transvsalgorconfusion[translabel, algorlabel] += 1
 
-    for confusion, name in zip([tranconfusion, algoconfusion, compconfusion], ["tran", "algo", "comp"]):
+    algorvstruthconfusion = algorvstruthconfusion.float()
+    truthvstransconfusion = truthvstransconfusion.float()
+    transvsalgorconfusion = transvsalgorconfusion.float()
 
-        plt.figure(figsize=(5,5))
+    algorvstruthconfusion /= (algorvstruthconfusion.sum(dim=1,keepdim=True) + 1e-8)
+    truthvstransconfusion /= (truthvstransconfusion.sum(dim=1,keepdim=True) + 1e-8)
+    transvsalgorconfusion /= (transvsalgorconfusion.sum(dim=1,keepdim=True) + 1e-8)
 
-        plt.imshow(confusion)
+    for confusion, name in zip([algorvstruthconfusion, truthvstransconfusion, transvsalgorconfusion], 
+                               ["Algo vs Truth", "Truth vs Transf", "Transf vs Algo"]):
+
+        plt.figure(figsize=(6,6))
+
+        plt.imshow(confusion, vmin=0., vmax=1.)
 
         plt.colorbar()
 
@@ -267,21 +298,12 @@ def plot_confusion_matrices(
 
         plt.tight_layout()
 
-        if (name == "algo"):
-            plt.xlabel("Algorithm")
-            plt.ylabel("Truth")
-            plt.title("Truth vs algorithm confusion")
-        elif (name == "tran"):
-            plt.xlabel("Transformer")
-            plt.ylabel("Truth")
-            plt.title("Truth vs transformer confusion")
-        else:
-            plt.xlabel("Transformer")
-            plt.ylabel("Algorithm")
-            plt.title("Transformer vs algorithm confusion")
+        plt.xlabel(name.split()[2])
+        plt.ylabel(name.split()[0])
+        plt.title(name)
 
         plt.savefig(
-            f"plots/{output_path}_{name}_confusion_matrix.png",
+            f"plots/{output_path}_confusion_matrix_{name}.png",
             dpi=200,
         )
 
@@ -296,17 +318,11 @@ def plot_event_display(
     output_path="test_model",
 ):
     
-    truth_colors = [
+    colors = [
         "tab:gray",
         "tab:blue",
         "tab:red",
     ]
-
-    markers = {
-        0: "P",
-        1: "s",
-        2: "o",
-    }
 
     legend_label = ["bkg", "chi0", "chi1"]
     
@@ -343,41 +359,39 @@ def plot_event_display(
 
             sizes = 20 + 15 * np.sqrt(pt_evt)
 
-            for pred, name in zip([pred, algo], ["tran", "algo"]):
+            for pred, name in zip([pred, algo, truth], ["Transformer", "Algorithm", "Truth"]):
 
                 plt.figure(figsize=(8,6))
 
-                for truth_cls in range(3):
+                for pred_cls in range(3):
 
-                    for pred_cls in range(3):
+                    selection = (pred == pred_cls)
 
-                        selection = ((truth == truth_cls) & (pred == pred_cls))
+                    if selection.sum() == 0:
+                        continue
 
-                        if selection.sum() == 0:
-                            continue
-
-                        plt.scatter(
-                            phi_evt[selection],
-                            eta_evt[selection],
-                            s=sizes[selection],
-                            c=truth_colors[truth_cls],
-                            marker=markers[pred_cls],
-                            edgecolors="black",
-                            linewidths=0.3,
-                            alpha=0.4,
-                            label=f"Truth {legend_label[truth_cls]}, {name} {legend_label[pred_cls]}",
-                        )
+                    plt.scatter(
+                        phi_evt[selection],
+                        eta_evt[selection],
+                        s=sizes[selection],
+                        c=colors[pred_cls],
+                        marker="o",
+                        edgecolors="black",
+                        linewidths=0.3,
+                        alpha=0.4,
+                        label=f"{name} {legend_label[pred_cls]}",
+                    )
 
                 plt.xlabel(r"$\phi$")
                 plt.ylabel(r"$\eta$")
                 plt.xlim(-math.pi,math.pi)
-                plt.title(f"{name} {category} loss: {loss:.3f}")
+                plt.title(f"Transformer {category} loss: {loss:.3f} ({name})")
                 plt.legend()
                 plt.grid()
                 plt.tight_layout()
 
                 plt.savefig(
-                    f"plots/{output_path}_{name}_{category}_loss_{loss:.3f}_evt_{idx}.png",
+                    f"plots/{output_path}_{category}_loss_{loss:.3f}_evt_{idx}_{name}.png",
                     dpi=200,
                 )
 
@@ -398,7 +412,7 @@ def reconstruct(
 
     B = labels.shape[0]
 
-    chi_masses = []
+    avg_chi_masses = []
     suu_masses = []
 
     for b in range(B):
@@ -454,15 +468,9 @@ def reconstruct(
                 - pz_sum**2
             )
 
-            masses.append(
-                torch.sqrt(
-                    torch.clamp(m2, min=0)
-                ).item()
-            )
+            masses.append(torch.sqrt(torch.clamp(m2, min=0)).item())
 
-        chi_masses.append(
-            0.5 * (masses[0] + masses[1])
-        )
+        avg_chi_masses.append(0.5 * (masses[0] + masses[1]))
 
         px_sum = chi_fourvecs[0][0] + chi_fourvecs[1][0]
         py_sum = chi_fourvecs[0][1] + chi_fourvecs[1][1]
@@ -482,7 +490,7 @@ def reconstruct(
             ).item()
         )
 
-    return chi_masses, suu_masses
+    return avg_chi_masses, suu_masses
 
 ###########################################################################
 # Plot mass peaks
@@ -564,7 +572,7 @@ def plot_mass_peaks(
     plt.tight_layout()
 
     plt.savefig(
-        f"plots/{output_path}_chi_mass.png",
+        f"plots/{output_path}_mass_chi.png",
         dpi=200,
     )
 
@@ -605,7 +613,7 @@ def plot_mass_peaks(
     plt.tight_layout()
 
     plt.savefig(
-        f"plots/{output_path}_suu_mass.png",
+        f"plots/{output_path}_mass_suu.png",
         dpi=200,
     )
 
@@ -684,6 +692,20 @@ def test(
                     logits,
                     algorithm_labels,
                 )
+            elif trainMode == "combined":
+                losses = criterion(
+                    10, # epoch
+                    10, # num_epochs, want to show final losses
+                    logits,
+                    probabilities,
+                    raw_pt,
+                    raw_eta,
+                    raw_phi,
+                    raw_E,
+                    algorithm_labels,
+                    algorithm_CA8labels,
+                    mask,
+                )
             else:
                 losses = criterion(
                     probabilities,
@@ -697,11 +719,20 @@ def test(
 
             batch_size = particles.shape[0]
 
-            for key in losses:
-                if key not in total_losses:
-                    total_losses[key] = losses[key].mean().item()
+            for key, value in losses.items():
+
+                # Skip non-tensor metadata
+                if "weight" in key:
+                    total_losses[key] = value
+                    continue
+
+                # Per-event vector
+                if value.ndim > 0:
+                    continue
+
+                # Scalar already averaged over batch
                 else:
-                    total_losses[key] += losses[key].mean().item()
+                    total_losses[key] = total_losses.get(key, 0.0) + value.item() * batch_size
 
             total_events += batch_size
 
@@ -736,6 +767,10 @@ def test(
     raw_E = torch.cat(all_raw_E)
     
     for key in total_losses:
+
+        if "weight" in key or key == "event_loss":
+            continue
+
         total_losses[key] /= total_events
 
     idx_worst = np.argpartition(event_losses, -num_worst)[-num_worst:]
@@ -818,6 +853,11 @@ def evaluate(
             "_use_pretrained",
             "_pretrain",
         )
+    elif trainMode == "combined":
+        checkpoint_path = tmp_path.replace(
+            "_combined",
+            "_pretrain",
+        )
     else:
         checkpoint_path = tmp_path
 
@@ -836,6 +876,8 @@ def evaluate(
     # Loss
     if trainMode == "pretrain":
         criterion = PretrainingLoss()
+    elif trainMode == "combined":
+        criterion = CombinedLoss()
     else:
         criterion = TwoBodyLoss()
 
@@ -893,7 +935,7 @@ def main(args):
     )
 
     trainModes = (
-        ["pretrain", "use_pretrained", "no_use_pretrained"]
+        ["pretrain", "use_pretrained", "no_use_pretrained", "combined"]
         if args.trainMode == "all"
         else [args.trainMode]
     )
@@ -970,10 +1012,11 @@ if __name__ == "__main__":
             "no_use_pretrained",
             "use_pretrained",
             "pretrain",
+            "combined",
             "all"
         ],
         default="no_use_pretrained",
-        help="Either pretrain, use_pretrained, no_use_pretrained, or all",
+        help="Either pretrain, use_pretrained, no_use_pretrained, combined, or all",
     )
 
     parser.add_argument(

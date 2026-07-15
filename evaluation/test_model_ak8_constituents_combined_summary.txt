@@ -1,0 +1,13 @@
+Test metrics
+====================
+
+loss                : 0.804452
+ce_loss             : 0.320340
+twobody_loss        : 0.772418
+ce_weight           : 0.100000
+twobody_weight      : 1.000000
+mass_loss           : 0.099712
+entropy_loss        : 0.067775
+split_loss          : 0.203178
+occupancy_loss      : 0.019644
+bkg_loss            : 0.382108

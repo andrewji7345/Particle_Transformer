@@ -1,5 +1,4 @@
 Test metrics
 ====================
 
-loss                : 1.331954
-event_loss          : 1.331954
+loss                : 0.933183

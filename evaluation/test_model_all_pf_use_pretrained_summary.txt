@@ -1,0 +1,9 @@
+Test metrics
+====================
+
+loss                : 0.634937
+mass_loss           : 0.122266
+entropy_loss        : 0.051938
+split_loss          : 0.252336
+occupancy_loss      : 0.076971
+bkg_loss            : 0.131426
