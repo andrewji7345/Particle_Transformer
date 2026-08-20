@@ -21,6 +21,38 @@ options.register(
     'Output ROOT file'
 )
 
+options.register(
+    'jetPtCut',
+    300.0,
+    VarParsing.multiplicity.singleton,
+    VarParsing.varType.float,
+    'Jet pT threshold'
+)
+
+options.register(
+    'akRadius',
+    0.8,
+    VarParsing.multiplicity.singleton,
+    VarParsing.varType.float,
+    'AK jet clustering radius'
+)
+
+options.register(
+    'caRadius',
+    0.8,
+    VarParsing.multiplicity.singleton,
+    VarParsing.varType.float,
+    'CA jet clustering radius'
+)
+
+options.register(
+    'cosThrust',
+    0.85,
+    VarParsing.multiplicity.singleton,
+    VarParsing.varType.float,
+    'Cosine similarity to assign CA jet to SJ'
+)
+
 options.parseArguments()
 
 def readFileList(fname):
@@ -35,7 +67,8 @@ process.load("FWCore.MessageService.MessageLogger_cfi")
 process.MessageLogger.cerr.FwkReport.reportEvery = 1000
 
 process.maxEvents = cms.untracked.PSet(
-    input = cms.untracked.int32(-1)
+    #input = cms.untracked.int32(-1) # for realsies
+    input = cms.untracked.int32(1000) # for ntuplizer evaluation
 )
 
 process.source = cms.Source(
@@ -51,6 +84,14 @@ process.TFileService = cms.Service(
 )
 
 process.load("SuuAnalysis.ParticleTransformer.ParticleTransformerNtuplizer_cfi")
+
+process.particleTransformerNtuplizer.jetPtCut = cms.double(options.jetPtCut)
+
+process.particleTransformerNtuplizer.akRadius = cms.double(options.akRadius)
+
+process.particleTransformerNtuplizer.caRadius = cms.double(options.caRadius)
+
+process.particleTransformerNtuplizer.cosThrust = cms.double(options.cosThrust)
 
 process.p = cms.Path(
     process.particleTransformerNtuplizer
