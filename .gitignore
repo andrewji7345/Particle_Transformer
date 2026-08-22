@@ -1,1 +1,7 @@
 /ptfiles/
+/evaluation/
+/ntuplizer_evaluation/
+/preprocessor_evaluation/
+/plots/
+/.env/
+/run_ntuplizer_scan/logs/
