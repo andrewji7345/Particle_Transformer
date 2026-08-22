@@ -1,21 +1,21 @@
-"""Evaluate old/new six-step reconstruction methods from one ntuple.
+"""Evaluate one slimmed or packed reconstruction ntuple at a time.
 
-Usage:
-  python3 evaluate_ntuplizer_old_new.py --old
-  python3 evaluate_ntuplizer_old_new.py --new
-  python3 evaluate_ntuplizer_old_new.py --both
-
-Comparable 1D distributions are overplotted in --both mode.  Two-dimensional
-diagnostics are saved separately for each method so their bin counts stay clear.
+Use ``--all`` to evaluate every ROOT file in ``--root-dir``. Results are
+written beneath ``ntuplizer_evaluation/<root-file-stem>/``.
 """
 
 import argparse
 import os
+from pathlib import Path
 
 import awkward as ak
 import matplotlib.pyplot as plt
 import numpy as np
 import uproot
+
+
+COLORS = {"truth": "tab:blue", "algorithm": "tab:orange", "transformer": "tab:green"}
+TREE_NAME = "particleTransformerNtuplizer/Events"
 
 
 ################################################################################
@@ -75,32 +75,81 @@ def simplify_truth_labels(truth_labels):
     return simple
 
 
-def get_method_configs(ak_radius, ca_radius):
-    """Centralize the branch and presentation differences between methods."""
+def get_method_config(algorithm_mode, ak_radius, ca_radius):
+    """Return the generic branches and presentation for this ntuple's teacher."""
+    if algorithm_mode == "slimmed":
+        display, ak_name, ca_name, color = "Slimmed reference (AK8/CA8)", "AK8", "CA8", COLORS["algorithm"]
+    elif algorithm_mode == "packed":
+        display = f"Packed PF (reclustered AK{ak_radius}/CA{ca_radius})"
+        ak_name, ca_name, color = f"AK{ak_radius}", f"CA{ca_radius}", COLORS["algorithm"]
+    else:
+        raise ValueError(f"Unknown algorithmMode {algorithm_mode!r}")
     return {
-        "old": {
-            "display": "Old (slimmedJetsAK8)",
-            "label_branch": "particle_oldAlgoLabel",
-            "ca_index_branch": "particle_oldAlgoCA8Index",
-            "ak_index_branch": "particle_oldAlgoAK8Index",
-            "ak_pt_branch": "ak8_pt",
-            "ak_name": "AK8",
-            "ca_name": "CA8",
-            "color": "tab:blue",
-            "linestyle": "-",
-        },
-        "new": {
-            "display": f"New (reclustered AK{ak_radius}/CA{ca_radius})",
-            "label_branch": "particle_newAlgoLabel",
-            "ca_index_branch": "particle_newAlgoCAIndex",
-            "ak_index_branch": "particle_newAlgoAKIndex",
-            "ak_pt_branch": None,
-            "ak_name": f"AK{ak_radius}",
-            "ca_name": f"CA{ca_radius}",
-            "color": "tab:orange",
-            "linestyle": "--",
-        },
+        "display": display,
+        "label_branch": "particle_algorithmLabel",
+        "ca_index_branch": "particle_algorithmCAIndex",
+        "ak_index_branch": "particle_algorithmAKIndex",
+        "ak_pt_branch": "ak_pt",
+        "ak_name": ak_name,
+        "ca_name": ca_name,
+        "color": color,
+        "linestyle": "-",
     }
+
+
+def normalize_algorithm_mode(value):
+    """Return the ntuplizer mode with bytes/string wrappers removed."""
+    if isinstance(value, bytes):
+        value = value.decode()
+    mode = str(value)
+    if mode not in ("slimmed", "packed"):
+        raise ValueError(f"Unknown algorithmMode {mode!r}")
+    return mode
+
+
+def inspect_input(path):
+    """Validate a ROOT input and return its slimmed/packed reconstruction mode."""
+    with uproot.open(path) as root_file:
+        if TREE_NAME not in root_file:
+            raise KeyError(f"missing {TREE_NAME}")
+        tree = root_file[TREE_NAME]
+        if tree.num_entries == 0:
+            raise ValueError("event tree is empty")
+        if "algorithmMode" not in tree:
+            raise KeyError("missing algorithmMode branch")
+        values = tree["algorithmMode"].array(entry_stop=1, library="np")
+        if len(values) == 0:
+            raise ValueError("algorithmMode branch is empty")
+        return normalize_algorithm_mode(values[0])
+
+
+def discover_inputs(root_dir):
+    """Recursively find valid slimmed and packed ParticleTransformer ntuples."""
+    root_dir = Path(root_dir)
+    if not root_dir.is_dir():
+        raise FileNotFoundError(f"ROOT directory does not exist: {root_dir}")
+
+    candidates = sorted(path for path in root_dir.rglob("*.root") if path.is_file())
+    valid = []
+    counts = {"slimmed": 0, "packed": 0}
+    for path in candidates:
+        try:
+            mode = inspect_input(path)
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            print(f"[WARNING] Skipping invalid ROOT file {path}: {error}")
+            continue
+        valid.append(path)
+        counts[mode] += 1
+
+    if not valid:
+        raise FileNotFoundError(
+            f"No valid slimmed or packed ParticleTransformer ROOT files found in {root_dir}"
+        )
+    print(
+        f"Found {len(valid)} valid ROOT files "
+        f"({counts['slimmed']} slimmed, {counts['packed']} packed)."
+    )
+    return valid
 
 
 def pairwise_delta_rs(labels, jets):
@@ -120,16 +169,47 @@ def save_close(output, filename):
     plt.close()
 
 
+def aligned_labels(reference, labels):
+    """Resolve the arbitrary chi0/chi1 naming convention event-wise globally."""
+    swapped = labels.copy()
+    swapped[labels == 1] = 2
+    swapped[labels == 2] = 1
+    return swapped if np.sum(reference == swapped) > np.sum(reference == labels) else labels
+
+
+def plot_confusion(reference, labels, output, filename, title, xlabel, ylabel):
+    labels = aligned_labels(reference, labels)
+    counts = np.zeros((3, 3), dtype=float)
+    for row, column in zip(reference, labels):
+        if 0 <= row < 3 and 0 <= column < 3:
+            counts[row, column] += 1
+    normalized = counts / np.maximum(counts.sum(axis=1, keepdims=True), 1)
+    plt.figure(figsize=(6, 5))
+    plt.imshow(normalized, vmin=0, vmax=1, cmap="Blues")
+    plt.colorbar(label="Fraction of reference class")
+    classes = ["background", r"$\chi_0$", r"$\chi_1$"]
+    plt.xticks(range(3), classes)
+    plt.yticks(range(3), classes)
+    for i in range(3):
+        for j in range(3):
+            plt.text(j, i, f"{normalized[i, j]:.2f}", ha="center", va="center",
+                     color="white" if normalized[i, j] > 0.5 else "black")
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    save_close(output, filename)
+
+
 ################################################################################
 # Event reconstruction
 ################################################################################
 
 def reconstruct_event(event, selected_methods, method_configs):
     """Reconstruct truth and all requested algorithm quantities for one event."""
-    px = np.asarray(event["particle_px"])
-    py = np.asarray(event["particle_py"])
-    pz = np.asarray(event["particle_pz"])
-    E = np.asarray(event["particle_energy"])
+    px = np.asarray(event["particle_puppi_px"])
+    py = np.asarray(event["particle_puppi_py"])
+    pz = np.asarray(event["particle_puppi_pz"])
+    E = np.asarray(event["particle_puppi_energy"])
     truth = simplify_truth_labels(event["particle_truthLabel"])
     truth_chi0 = truth == 1
     truth_chi1 = truth == 2
@@ -143,6 +223,7 @@ def reconstruct_event(event, selected_methods, method_configs):
         "n_truth_chi0": int(np.sum(truth_chi0)),
         "n_truth_chi1": int(np.sum(truth_chi1)),
         "n_truth_unassigned": int(np.sum(truth == 0)),
+        "truth_labels": truth,
         "algorithms": {},
     }
 
@@ -155,7 +236,7 @@ def reconstruct_event(event, selected_methods, method_configs):
         ak_jets = build_jets(ak_indices, px, py, pz, E)
 
         if config["ak_pt_branch"]:
-            # Corrected pT from the input slimmedJetsAK8 collection.
+            # Algorithm AK pT stored by the ntuplizer for this selected run.
             ak_pts = np.asarray(event[config["ak_pt_branch"]], dtype=float)
         else:
             # Custom AK jets are reconstructed directly from PF constituents.
@@ -197,6 +278,7 @@ def reconstruct_event(event, selected_methods, method_configs):
             "sj_kinematics": sj_kinematics,
             "ak_kinematics": ak_jets,
             "ak_pts": ak_pts,
+            "labels": labels,
         }
 
     return result
@@ -206,12 +288,12 @@ def reconstruct_event(event, selected_methods, method_configs):
 # Main evaluation
 ################################################################################
 
-def main(args):
-    selected_methods = ["old"] if args.old else ["new"] if args.new else ["old", "new"]
-
-    print(f"Opening file {args.input}\n")
-    root_file = uproot.open(args.input)
-    tree = root_file["particleTransformerNtuplizer/Events"]
+def evaluate_file(input_path, args):
+    print(f"Opening file {input_path}\n")
+    # Read std::string separately: uproot can omit it from grouped Awkward arrays.
+    algorithm_mode = inspect_input(input_path)
+    root_file = uproot.open(input_path)
+    tree = root_file[TREE_NAME]
     branches = tree.arrays(library="ak", entry_stop=args.num_events)
     n_events = len(branches)
     if n_events == 0:
@@ -220,11 +302,14 @@ def main(args):
     jet_pt_cut = int(branches["jetPtCut"][0])
     ak_radius = int(round(float(branches["akRadius"][0]) * 10))
     ca_radius = int(round(float(branches["caRadius"][0]) * 10))
-    configs = get_method_configs(ak_radius, ca_radius)
+    selected_methods = [algorithm_mode]
+    configs = {algorithm_mode: get_method_config(algorithm_mode, ak_radius, ca_radius)}
 
-    required = {"particle_px", "particle_py", "particle_pz", "particle_energy",
+    required = {"particle_puppi_px", "particle_puppi_py", "particle_puppi_pz",
+                "particle_puppi_energy",
                 "particle_truthLabel", "gen_Suu_E", "gen_Suu_px", "gen_Suu_py",
-                "gen_Suu_pz", "nParticles"}
+                "gen_Suu_pz", "nParticles", "jetPtCut",
+                "akRadius", "caRadius"}
     for method in selected_methods:
         config = configs[method]
         required.update([config["label_branch"], config["ca_index_branch"], config["ak_index_branch"]])
@@ -234,7 +319,7 @@ def main(args):
     if missing:
         raise KeyError("Missing branches required by selected method(s): " + ", ".join(missing))
 
-    output = (f"{args.output}_jetPtCut{jet_pt_cut}_ak{ak_radius}_ca{ca_radius}_{args.method}/")
+    output = str(Path(args.output) / Path(input_path).stem)
     os.makedirs(output, exist_ok=True)
     print(f"Loaded {n_events} events, {len(branches.fields)} branches\n")
 
@@ -276,6 +361,13 @@ def main(args):
                     data["high_mass_sjs"].append(sj)
         method_data[method] = data
 
+    truth_labels_flat = np.concatenate([r["truth_labels"] for r in results])
+    for method in selected_methods:
+        algorithm_labels_flat = np.concatenate([r["algorithms"][method]["labels"] for r in results])
+        plot_confusion(truth_labels_flat, algorithm_labels_flat, output,
+                       f"{method}_algorithm_vs_truth_confusion.png",
+                       "Algorithm assignment vs truth", "Algorithm assignment", "Truth assignment")
+
     ################################################################################
     # Energy accounting
     ################################################################################
@@ -286,7 +378,7 @@ def main(args):
 
     for iev in range(n_events):
         event = branches[iev]
-        E = np.asarray(event["particle_energy"])
+        E = np.asarray(event["particle_puppi_energy"])
         truth = simplify_truth_labels(event["particle_truthLabel"])
         visible_E = np.sum(E[truth > 0])
         if visible_E <= 0:
@@ -406,7 +498,7 @@ def main(args):
     plt.hist(total_mass, bins=100, range=(0, 5000), histtype="step", linewidth=2,
              label="All PF candidates")
     plt.hist(truth_suu_mass, bins=100, range=(0, 5000), histtype="step", linewidth=2,
-             label="Truth labels", color="grey")
+             label="Truth labels", color=COLORS["truth"])
     for method in selected_methods:
         c = configs[method]
         plt.hist(method_data[method]["suu_mass"], bins=100, range=(0, 5000),
@@ -432,6 +524,44 @@ def main(args):
     plt.title(r"Reconstructed $m_{\chi}$")
     plt.legend()
     save_close(output, "chi_mass.png")
+
+    truth_average_chi_mass = 0.5 * (truth_chi0_mass + truth_chi1_mass)
+    plt.figure(figsize=(8, 6))
+    plt.hist(truth_average_chi_mass, bins=100, range=(0, 1500), histtype="step",
+             linewidth=2, color=COLORS["truth"], label="Truth")
+    for method in selected_methods:
+        average = 0.5 * (method_data[method]["chi0_mass"] + method_data[method]["chi1_mass"])
+        plt.hist(average, bins=100, range=(0, 1500), histtype="step", linewidth=2,
+                 color=configs[method]["color"], label=configs[method]["display"])
+    plt.xlabel(r"Average reconstructed $m_{\chi}$ [GeV]")
+    plt.ylabel("Events")
+    plt.title(r"Average $\chi$ mass")
+    plt.legend()
+    save_close(output, "average_chi_mass.png")
+
+    plt.figure(figsize=(8, 6))
+    for method in selected_methods:
+        residual = method_data[method]["suu_mass"] - truth_suu_mass
+        plt.hist(residual, bins=100, range=(-2500, 2500), histtype="step", linewidth=2,
+                 color=configs[method]["color"], label=configs[method]["display"])
+    plt.axvline(0, color="black", linewidth=1)
+    plt.xlabel(r"$m_{Suu}^{\mathrm{reco}}-m_{Suu}^{\mathrm{truth}}$ [GeV]")
+    plt.ylabel("Events")
+    plt.title(r"$Suu$ mass residual")
+    plt.legend()
+    save_close(output, "suu_mass_residual.png")
+
+    plt.figure(figsize=(7, 6))
+    for method in selected_methods:
+        resolution = (method_data[method]["suu_mass"] - truth_suu_mass) / np.maximum(truth_suu_mass, 1.)
+        plt.scatter(truth_suu_mass, resolution, s=5, alpha=0.3,
+                    color=configs[method]["color"], label=configs[method]["display"])
+    plt.axhline(0, color="black", linewidth=1)
+    plt.xlabel(r"Truth $m_{Suu}$ [GeV]")
+    plt.ylabel(r"Relative $Suu$ mass residual")
+    plt.title(r"$Suu$ mass resolution")
+    plt.legend()
+    save_close(output, "suu_mass_resolution.png")
 
     plt.figure(figsize=(6, 6))
     plt.scatter(truth_chi0_mass, truth_chi1_mass, s=5, alpha=0.4, color="grey")
@@ -679,25 +809,31 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--input", help="Input ROOT ntuple")
     parser.add_argument(
-        "--input",
-        default="/eos/uscms/store/user/aji/rootfiles_particleTransformer/"
-                "WbWb_4000_1000.root",
-        help="Input ROOT ntuple",
+        "--all", action="store_true",
+        help=("Recursively evaluate every valid slimmed or packed ParticleTransformer "
+              "ROOT file in --root-dir instead of one --input"),
     )
-    parser.add_argument("--output", default="evaluate_ntuplizer",
+    parser.add_argument(
+        "--root-dir",
+        default="/eos/uscms/store/user/aji/rootfiles_particleTransformer",
+        help="Directory scanned by --all",
+    )
+    parser.add_argument("--output", default="ntuplizer_evaluation",
                         help="Base directory for plots and printed results")
     parser.add_argument("--num-events", default=1000, type=int,
                         help="Maximum number of events")
 
-    method_group = parser.add_mutually_exclusive_group(required=True)
-    method_group.add_argument("--old", action="store_true",
-                              help="Use only the slimmedJetsAK8 method")
-    method_group.add_argument("--new", action="store_true",
-                              help="Use only the directly reclustered method")
-    method_group.add_argument("--both", action="store_true",
-                              help="Run both methods and overplot comparable distributions")
-
     args = parser.parse_args()
-    args.method = "old" if args.old else "new" if args.new else "both"
-    main(args)
+    if args.all:
+        try:
+            inputs = discover_inputs(args.root_dir)
+        except FileNotFoundError as error:
+            parser.error(str(error))
+    elif args.input:
+        inputs = [Path(args.input)]
+    else:
+        parser.error("Specify --input or --all")
+    for input_path in inputs:
+        evaluate_file(str(input_path), args)

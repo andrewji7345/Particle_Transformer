@@ -14,11 +14,18 @@ options.register(
 
 options.register(
     'outputRootFile',
-    'rootfiles_particleTransformer/WbWb_4000_1000.root', # to test ntuplizer
-    #'rootfiles_particleTransformer/WbWb_all.root', # for realsies
+    '',
     VarParsing.multiplicity.singleton,
     VarParsing.varType.string,
     'Output ROOT file'
+)
+
+options.register(
+    'algorithmMode',
+    'slimmed',
+    VarParsing.multiplicity.singleton,
+    VarParsing.varType.string,
+    "Reconstruction teacher: 'slimmed' (fixed reference) or 'packed' (configurable)"
 )
 
 options.register(
@@ -55,6 +62,30 @@ options.register(
 
 options.parseArguments()
 
+if options.algorithmMode not in ('slimmed', 'packed'):
+    raise ValueError("algorithmMode must be 'slimmed' or 'packed'")
+
+if options.algorithmMode == 'slimmed':
+    fixed = (options.jetPtCut, options.akRadius, options.caRadius, options.cosThrust)
+    reference = (300.0, 0.8, 0.8, 0.85)
+    if fixed != reference:
+        raise ValueError(
+            "The slimmed reference is fixed to pt300/AK8/CA8/th85. "
+            "Use algorithmMode=packed to change reconstruction hyperparameters."
+        )
+
+if not options.outputRootFile:
+    if options.algorithmMode == 'slimmed':
+        filename = 'WbWb_4000_1000_slimmed.root'
+    else:
+        filename = (
+            f'WbWb_4000_1000_packed_pt{int(options.jetPtCut)}'
+            f'_ak{int(round(10 * options.akRadius))}'
+            f'_ca{int(round(10 * options.caRadius))}'
+            f'_th{int(round(100 * options.cosThrust))}.root'
+        )
+    options.outputRootFile = f'rootfiles_particleTransformer/{filename}'
+
 def readFileList(fname):
     with open(fname) as f:
         return [line.strip() for line in f
@@ -67,8 +98,8 @@ process.load("FWCore.MessageService.MessageLogger_cfi")
 process.MessageLogger.cerr.FwkReport.reportEvery = 1000
 
 process.maxEvents = cms.untracked.PSet(
-    #input = cms.untracked.int32(-1) # for realsies
-    input = cms.untracked.int32(1000) # for ntuplizer evaluation
+    input = cms.untracked.int32(-1) # for realsies
+    #input = cms.untracked.int32(1000) # for ntuplizer evaluation
 )
 
 process.source = cms.Source(
@@ -85,6 +116,7 @@ process.TFileService = cms.Service(
 
 process.load("SuuAnalysis.ParticleTransformer.ParticleTransformerNtuplizer_cfi")
 
+process.particleTransformerNtuplizer.algorithmMode = cms.string(options.algorithmMode)
 process.particleTransformerNtuplizer.jetPtCut = cms.double(options.jetPtCut)
 
 process.particleTransformerNtuplizer.akRadius = cms.double(options.akRadius)

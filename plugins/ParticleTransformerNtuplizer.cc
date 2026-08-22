@@ -1,4 +1,8 @@
-// Record all relevant event information to a root file.
+// Record all relevant event information to a ROOT file.
+//
+// Both raw and PUPPI-weighted PackedCandidate four-vectors are stored. The
+// The selected slimmed-jet or packed-PF reconstruction flow uses the
+// PUPPI-weighted four-vectors internally.
 
 #include <memory>
 #include <vector>
@@ -22,6 +26,7 @@
 #include "FWCore/Framework/interface/MakerMacros.h"
 #include "FWCore/ParameterSet/interface/ParameterSet.h"
 #include "FWCore/Utilities/interface/InputTag.h"
+#include "FWCore/Utilities/interface/Exception.h"
 #include "FWCore/ParameterSet/interface/ConfigurationDescriptions.h"
 #include "FWCore/ParameterSet/interface/ParameterSetDescription.h"
 
@@ -131,6 +136,25 @@ void branchParticle(TTree* tree,
 }
 
 //--------------------------------------------------
+// Helper function: build a PUPPI-weighted PF-candidate four-vector
+//--------------------------------------------------
+
+TLorentzVector makePuppiP4(const pat::PackedCandidate& candidate)
+{
+    const double weight = candidate.puppiWeight();
+
+    TLorentzVector p4;
+    p4.SetPxPyPzE(
+        weight * candidate.px(),
+        weight * candidate.py(),
+        weight * candidate.pz(),
+        weight * candidate.energy()
+    );
+
+    return p4;
+}
+
+//--------------------------------------------------
 // Helper function: recursively find the truth label for a genParticle's origin
 //--------------------------------------------------
 
@@ -172,7 +196,7 @@ std::set<int> getTruthLabel(const reco::Candidate* p,
 
         // Check last copies
         const reco::Candidate* p_lastcopy = findLastCopy(p);
-        
+
         if (p_lastcopy == gen_W_q0_ptr[i])   {labels.insert(offset + 1);}
         if (p_lastcopy == gen_W_q1_ptr[i])   {labels.insert(offset + 2);}
         if (p_lastcopy == gen_b_ptr[i])      {labels.insert(offset + 3);}
@@ -257,23 +281,23 @@ struct CellHash {
 };
 
 //----------------------------------------------------------------------
-// Old jet sorting algorithm
+// Jet sorting algorithm
 //----------------------------------------------------------------------
 
-class oldJetSortingAlgorithm {
+class JetSortingAlgorithm {
 
 public:
 
-  oldJetSortingAlgorithm(double jetPtCut, 
-                         double akRadius, 
-                         double caRadius, 
-                         double cosThrust,
-                         bool useSlimmedAK8): 
-    jetPtCut_(jetPtCut), 
-    akRadius_(akRadius), 
-    caRadius_(caRadius), 
+  JetSortingAlgorithm(double jetPtCut,
+                      double akRadius,
+                      double caRadius,
+                      double cosThrust,
+                      bool useSlimmedAK8):
+    jetPtCut_(jetPtCut),
+    akRadius_(akRadius),
+    caRadius_(caRadius),
     cosThrust_(cosThrust),
-    useSlimmedAK8_(useSlimmedAK8) 
+    useSlimmedAK8_(useSlimmedAK8)
     {};
 
   void run(const pat::PackedCandidateCollection& pfcands,
@@ -307,7 +331,7 @@ public:
     return caJets_;
   }
 
-  
+
 
 private:
 
@@ -382,7 +406,7 @@ private:
 
 // clear
 
-void oldJetSortingAlgorithm::clear() {
+void JetSortingAlgorithm::clear() {
 
   constituents_.clear();
 
@@ -404,7 +428,7 @@ void oldJetSortingAlgorithm::clear() {
 
 // run
 
-void oldJetSortingAlgorithm::run(
+void JetSortingAlgorithm::run(
   const pat::PackedCandidateCollection& pfcands,
   const pat::JetCollection& ak8Jets) {
 
@@ -439,12 +463,12 @@ void oldJetSortingAlgorithm::run(
 
 // collectAK8Constituents
 
-void oldJetSortingAlgorithm::collectAK8Constituents(
+void JetSortingAlgorithm::collectAK8Constituents(
   const pat::PackedCandidateCollection& pfcands,
   const pat::JetCollection& ak8Jets) {
 
   akJets_.reserve(ak8Jets.size());
-    
+
   for (size_t jetIdx = 0; jetIdx < ak8Jets.size(); ++jetIdx) { // Loop over fatjets
 
     const auto& jet = ak8Jets[jetIdx];
@@ -452,12 +476,6 @@ void oldJetSortingAlgorithm::collectAK8Constituents(
     if (jet.pt() < jetPtCut_) {continue;}
 
     JetRecord record;
-    record.p4.SetPxPyPzE(
-        jet.px(),
-        jet.py(),
-        jet.pz(),
-        jet.energy()
-    );
 
     record.pfIndices.reserve(jet.daughterPtrVector().size());
 
@@ -474,18 +492,21 @@ void oldJetSortingAlgorithm::collectAK8Constituents(
       akJet_indices_[pfIndex] = static_cast<int>(jetIdx);
 
       const auto& pfcand = pfcands[pfIndex];
+      const TLorentzVector puppiP4 = makePuppiP4(pfcand);
+
+      // A zero PUPPI weight removes this candidate from the reconstructed
+      // jet while retaining its slimmed-jet membership above.
+      if (pfcand.puppiWeight() <= 0.) {
+        continue;
+      }
 
       Constituent c;
       c.pfIndex = pfIndex;
       c.originalAK8 = static_cast<int>(jetIdx);
-      c.p4.SetPxPyPzE(
-        pfcand.px(),
-        pfcand.py(),
-        pfcand.pz(),
-        pfcand.energy()
-      );
+      c.p4 = puppiP4;
 
       constituents_.push_back(c);
+      record.p4 += puppiP4;
     }
 
     akJets_.push_back(std::move(record));
@@ -495,7 +516,7 @@ void oldJetSortingAlgorithm::collectAK8Constituents(
 
 // collectAKConstituents
 
-void oldJetSortingAlgorithm::collectAKConstituents(
+void JetSortingAlgorithm::collectAKConstituents(
     const pat::PackedCandidateCollection& pfcands) {
 
   // Convert PF candidates into FastJet pseudojets
@@ -504,12 +525,17 @@ void oldJetSortingAlgorithm::collectAKConstituents(
   for (size_t i = 0; i < pfcands.size(); ++i) {
 
     const auto& pfcand = pfcands[i];
+    const TLorentzVector puppiP4 = makePuppiP4(pfcand);
+
+    if (pfcand.puppiWeight() <= 0.) {
+      continue;
+    }
 
     fastjet::PseudoJet pj(
-      pfcand.px(),
-      pfcand.py(),
-      pfcand.pz(),
-      pfcand.energy()
+      puppiP4.Px(),
+      puppiP4.Py(),
+      puppiP4.Pz(),
+      puppiP4.E()
     );
 
     // Preserve the original PackedCandidate index
@@ -557,16 +583,14 @@ void oldJetSortingAlgorithm::collectAKConstituents(
       record.pfIndices.push_back(pfIndex);
       akJet_indices_[pfIndex] = static_cast<int>(jetIdx);
 
-      const auto& pfcand = pfcands[pfIndex];
-
       Constituent c;
       c.pfIndex = pfIndex;
       c.originalAK8 = static_cast<int>(jetIdx);
       c.p4.SetPxPyPzE(
-          pfcand.px(),
-          pfcand.py(),
-          pfcand.pz(),
-          pfcand.energy()
+          fjConstituent.px(),
+          fjConstituent.py(),
+          fjConstituent.pz(),
+          fjConstituent.e()
       );
 
       constituents_.push_back(c);
@@ -579,7 +603,7 @@ void oldJetSortingAlgorithm::collectAKConstituents(
 
 // computeMPPBoost
 
-void oldJetSortingAlgorithm::computeMPPBoost() {
+void JetSortingAlgorithm::computeMPPBoost() {
 
     totalP4_.SetPxPyPzE(0., 0., 0., 0.);
 
@@ -593,7 +617,7 @@ void oldJetSortingAlgorithm::computeMPPBoost() {
 
 // boostConstituents
 
-void oldJetSortingAlgorithm::boostConstituents() {
+void JetSortingAlgorithm::boostConstituents() {
 
   for (auto& constituent : constituents_) {
     constituent.p4.Boost(-betaMPP_);
@@ -603,7 +627,7 @@ void oldJetSortingAlgorithm::boostConstituents() {
 
 // reclusterCA
 
-void oldJetSortingAlgorithm::reclusterCA() {
+void JetSortingAlgorithm::reclusterCA() {
 
   cafjParticles_.clear();
   caJets_.clear();
@@ -656,7 +680,7 @@ void oldJetSortingAlgorithm::reclusterCA() {
 
 // findThrustAxis
 
-void oldJetSortingAlgorithm::findThrustAxis() {
+void JetSortingAlgorithm::findThrustAxis() {
 
   if (constituents_.empty()) {
     thrustAxis_.SetXYZ(0,0,0);
@@ -714,7 +738,7 @@ void oldJetSortingAlgorithm::findThrustAxis() {
 
 // assignCAToChiUsingCos
 
-void oldJetSortingAlgorithm::assignCAToChiUsingCos() {
+void JetSortingAlgorithm::assignCAToChiUsingCos() {
 
   for (size_t i = 0; i < caJets_.size(); i++) {
 
@@ -739,7 +763,7 @@ void oldJetSortingAlgorithm::assignCAToChiUsingCos() {
 
 // assignCAToChiUsingMassDiff
 
-void oldJetSortingAlgorithm::assignCAToChiUsingMassDiff() {
+void JetSortingAlgorithm::assignCAToChiUsingMassDiff() {
 
   if (caJets_.empty()) {
     return;
@@ -847,7 +871,7 @@ void oldJetSortingAlgorithm::assignCAToChiUsingMassDiff() {
 
 // enforceChiPtOrdering
 
-void oldJetSortingAlgorithm::enforceChiPtOrdering() {
+void JetSortingAlgorithm::enforceChiPtOrdering() {
 
   TLorentzVector chi0;
   TLorentzVector chi1;
@@ -868,7 +892,7 @@ void oldJetSortingAlgorithm::enforceChiPtOrdering() {
   // Already in desired convention
   if (chi0.Pt() >= chi1.Pt())
     return;
-  
+
   // Swap chi labels
   for (auto& jet : caJets_) {
 
@@ -882,7 +906,7 @@ void oldJetSortingAlgorithm::enforceChiPtOrdering() {
 
 }
 
-void oldJetSortingAlgorithm::assignParticleIndices() {
+void JetSortingAlgorithm::assignParticleIndices() {
 
   std::fill(labels_.begin(), labels_.end(), 0);
   std::fill(caJet_indices_.begin(), caJet_indices_.end(), -1);
@@ -921,7 +945,7 @@ class ParticleTransformerNtuplizer: public edm::one::EDAnalyzer<edm::one::Shared
     void printEventDebug();
     void printMotherChain(const reco::Candidate* p);
     void printAncestryGraph(const reco::Candidate* p,const reco::Candidate* b0,const reco::Candidate* b1,int depth = 0,std::set<const reco::Candidate*>* visited = nullptr);
-    
+
 
   //------------------------------------
   // Tokens
@@ -942,22 +966,30 @@ class ParticleTransformerNtuplizer: public edm::one::EDAnalyzer<edm::one::Shared
   //------------------------------------
 
   TTree* tree_;
-  std::vector<float> particle_pt;
-  std::vector<float> particle_eta;
-  std::vector<float> particle_phi;
-  std::vector<float> particle_energy;
-  std::vector<float> particle_mass;
-  
-  std::vector<float> particle_px;
-  std::vector<float> particle_py;
-  std::vector<float> particle_pz;
-  
+  std::vector<float> particle_raw_pt;
+  std::vector<float> particle_raw_eta;
+  std::vector<float> particle_raw_phi;
+  std::vector<float> particle_raw_energy;
+  std::vector<float> particle_raw_mass;
+  std::vector<float> particle_raw_px;
+  std::vector<float> particle_raw_py;
+  std::vector<float> particle_raw_pz;
+
+  std::vector<float> particle_puppi_pt;
+  std::vector<float> particle_puppi_eta;
+  std::vector<float> particle_puppi_phi;
+  std::vector<float> particle_puppi_energy;
+  std::vector<float> particle_puppi_mass;
+  std::vector<float> particle_puppi_px;
+  std::vector<float> particle_puppi_py;
+  std::vector<float> particle_puppi_pz;
+
   std::vector<int> particle_charge;
   std::vector<int> particle_pdgId;
-  
+
   std::vector<float> particle_dz;
   std::vector<float> particle_dxy;
-  
+
   std::vector<float> particle_puppiWeight;
   std::vector<int> particle_fromPV;
   std::vector<int> particle_pvAssociationQuality;
@@ -966,14 +998,12 @@ class ParticleTransformerNtuplizer: public edm::one::EDAnalyzer<edm::one::Shared
   std::vector<float> particle_vy;
   std::vector<float> particle_vz;
 
-  std::vector<int> particle_oldAlgoLabel;
-  std::vector<int> particle_oldAlgoAK4Label;
-  std::vector<int> particle_oldAlgoAK8Index;
-  std::vector<int> particle_oldAlgoCA8Index;
-  
-  std::vector<int> particle_newAlgoLabel;
-  std::vector<int> particle_newAlgoAKIndex;
-  std::vector<int> particle_newAlgoCAIndex;
+  // Exactly one reconstruction teacher is written per ntuple.  These indices
+  // identify the selected AK/CA jets used to make that teacher, so they also
+  // define the AK-constituent input sample without a later pT re-selection.
+  std::vector<int> particle_algorithmLabel;
+  std::vector<int> particle_algorithmAKIndex;
+  std::vector<int> particle_algorithmCAIndex;
 
   std::vector<float> ak_pt;
   std::vector<float> ak_eta;
@@ -1038,6 +1068,7 @@ class ParticleTransformerNtuplizer: public edm::one::EDAnalyzer<edm::one::Shared
   double akRadius_;
   double caRadius_;
   double cosThrust_;
+  std::string algorithmMode_;
 
   std::vector<int> particle_match_pdgid;
   std::vector<float> particle_match_dr2;
@@ -1087,6 +1118,22 @@ ParticleTransformerNtuplizer::ParticleTransformerNtuplizer(
     caRadius_ = iConfig.getParameter<double>("caRadius");
 
     cosThrust_ = iConfig.getParameter<double>("cosThrust");
+    algorithmMode_ = iConfig.getParameter<std::string>("algorithmMode");
+
+    if (algorithmMode_ != "slimmed" && algorithmMode_ != "packed") {
+      throw cms::Exception("Configuration")
+          << "algorithmMode must be 'slimmed' or 'packed', not '"
+          << algorithmMode_ << "'.";
+    }
+
+    // The slimmed teacher is the fixed reference algorithm.  Packed mode is
+    // the only mode for which the four reconstruction hyperparameters vary.
+    if (algorithmMode_ == "slimmed") {
+      jetPtCut_ = 300.0;
+      akRadius_ = 0.8;
+      caRadius_ = 0.8;
+      cosThrust_ = 0.85;
+    }
 }
 
 //------------------------------------
@@ -1104,6 +1151,7 @@ void ParticleTransformerNtuplizer::printEventDebug() {
             << event << "\n";
 
   std::cout << "isMC: " << isMC_ << "\n";
+  std::cout << "algorithmMode: " << algorithmMode_ << "\n";
   std::cout << "jetPtCut:  " << jetPtCut_  << "\n";
   std::cout << "akRadius:  " << akRadius_  << "\n";
   std::cout << "caRadius:  " << caRadius_  << "\n";
@@ -1125,17 +1173,25 @@ void ParticleTransformerNtuplizer::printEventDebug() {
   // PF particles
   std::cout << "\n---------- PF PARTICLES ----------\n";
 
-  for (unsigned int i = 0; i < particle_pt.size(); i++) {
+  for (unsigned int i = 0; i < particle_raw_pt.size(); i++) {
 
-    std::cout << "Particle " << i << ": "
-              << "pt=" << particle_pt[i]
-              << " eta=" << particle_eta[i]
-              << " phi=" << particle_phi[i]
-              << " E=" << particle_energy[i]
-              << " m=" << particle_mass[i]
-              << " px=" << particle_px[i]
-              << " py=" << particle_py[i]
-              << " pz=" << particle_pz[i]
+    std::cout << "Particle " << i << ":"
+              << " raw_pt=" << particle_raw_pt[i]
+              << " raw_eta=" << particle_raw_eta[i]
+              << " raw_phi=" << particle_raw_phi[i]
+              << " raw_E=" << particle_raw_energy[i]
+              << " raw_m=" << particle_raw_mass[i]
+              << " raw_px=" << particle_raw_px[i]
+              << " raw_py=" << particle_raw_py[i]
+              << " raw_pz=" << particle_raw_pz[i]
+              << " puppi_pt=" << particle_puppi_pt[i]
+              << " puppi_eta=" << particle_puppi_eta[i]
+              << " puppi_phi=" << particle_puppi_phi[i]
+              << " puppi_E=" << particle_puppi_energy[i]
+              << " puppi_m=" << particle_puppi_mass[i]
+              << " puppi_px=" << particle_puppi_px[i]
+              << " puppi_py=" << particle_puppi_py[i]
+              << " puppi_pz=" << particle_puppi_pz[i]
               << "\n";
 
     std::cout << "  charge=" << particle_charge[i]
@@ -1153,17 +1209,13 @@ void ParticleTransformerNtuplizer::printEventDebug() {
               << particle_vx[i] << ", "
               << particle_vy[i] << ", "
               << particle_vz[i] << ")"
-              << " particle_oldAlgoLabel=" << particle_oldAlgoLabel[i]
-              << " particle_oldAlgoAK4Label=" << particle_oldAlgoAK4Label[i]
-              << " particle_oldAlgoAK8Index=" << particle_oldAlgoAK8Index[i]
-              << " particle_oldAlgoCA8Index=" << particle_oldAlgoCA8Index[i]
+              << " particle_algorithmLabel=" << particle_algorithmLabel[i]
+              << " particle_algorithmAKIndex=" << particle_algorithmAKIndex[i]
+              << " particle_algorithmCAIndex=" << particle_algorithmCAIndex[i]
               << "\n";
 
     std::cout << "  matchPDG=" << particle_match_pdgid[i]
               << " matchDR2=" << particle_match_dr2[i]
-              << " particle_newAlgoLabel=" << particle_newAlgoLabel[i]
-              << " particle_newAlgoAKIndex=" << particle_newAlgoAKIndex[i]
-              << " particle_newAlgoCAIndex=" << particle_newAlgoCAIndex[i]
               << " truthLabels=";
 
     for (auto label : particle_truthLabel[i])
@@ -1286,16 +1338,26 @@ void ParticleTransformerNtuplizer::beginJob(){
   tree_->Branch("akRadius",    &akRadius_);
   tree_->Branch("caRadius",    &caRadius_);
   tree_->Branch("cosThrust",   &cosThrust_);
+  tree_->Branch("algorithmMode", &algorithmMode_);
 
   // Particle information
-  tree_->Branch("particle_pt",     &particle_pt);
-  tree_->Branch("particle_eta",    &particle_eta);
-  tree_->Branch("particle_phi",    &particle_phi);
-  tree_->Branch("particle_energy", &particle_energy);
-  tree_->Branch("particle_mass", &particle_mass);
-  tree_->Branch("particle_px", &particle_px);
-  tree_->Branch("particle_py", &particle_py);
-  tree_->Branch("particle_pz", &particle_pz);
+  tree_->Branch("particle_raw_pt",     &particle_raw_pt);
+  tree_->Branch("particle_raw_eta",    &particle_raw_eta);
+  tree_->Branch("particle_raw_phi",    &particle_raw_phi);
+  tree_->Branch("particle_raw_energy", &particle_raw_energy);
+  tree_->Branch("particle_raw_mass",   &particle_raw_mass);
+  tree_->Branch("particle_raw_px",     &particle_raw_px);
+  tree_->Branch("particle_raw_py",     &particle_raw_py);
+  tree_->Branch("particle_raw_pz",     &particle_raw_pz);
+
+  tree_->Branch("particle_puppi_pt",     &particle_puppi_pt);
+  tree_->Branch("particle_puppi_eta",    &particle_puppi_eta);
+  tree_->Branch("particle_puppi_phi",    &particle_puppi_phi);
+  tree_->Branch("particle_puppi_energy", &particle_puppi_energy);
+  tree_->Branch("particle_puppi_mass",   &particle_puppi_mass);
+  tree_->Branch("particle_puppi_px",     &particle_puppi_px);
+  tree_->Branch("particle_puppi_py",     &particle_puppi_py);
+  tree_->Branch("particle_puppi_pz",     &particle_puppi_pz);
 
   tree_->Branch("particle_charge", &particle_charge);
   tree_->Branch("particle_pdgId",  &particle_pdgId);
@@ -1315,14 +1377,9 @@ void ParticleTransformerNtuplizer::beginJob(){
   tree_->Branch("particle_match_dr2", &particle_match_dr2);
   tree_->Branch("particle_truthLabel", &particle_truthLabel);
 
-  tree_->Branch("particle_oldAlgoLabel", &particle_oldAlgoLabel);
-  tree_->Branch("particle_oldAlgoAK4Label", &particle_oldAlgoAK4Label);
-  tree_->Branch("particle_oldAlgoAK8Index", &particle_oldAlgoAK8Index);
-  tree_->Branch("particle_oldAlgoCA8Index", &particle_oldAlgoCA8Index);
-
-  tree_->Branch("particle_newAlgoLabel", &particle_newAlgoLabel);
-  tree_->Branch("particle_newAlgoAKIndex", &particle_newAlgoAKIndex);
-  tree_->Branch("particle_newAlgoCAIndex", &particle_newAlgoCAIndex);
+  tree_->Branch("particle_algorithmLabel", &particle_algorithmLabel);
+  tree_->Branch("particle_algorithmAKIndex", &particle_algorithmAKIndex);
+  tree_->Branch("particle_algorithmCAIndex", &particle_algorithmCAIndex);
 
   // AK jets
   tree_->Branch("ak_pt",   &ak_pt);
@@ -1383,21 +1440,30 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
                           const edm::EventSetup&) {
 
   // Clear vectors
-  particle_pt.clear();
-  particle_eta.clear();
-  particle_phi.clear();
-  particle_energy.clear();
-  particle_mass.clear();
-  particle_px.clear();
-  particle_py.clear();
-  particle_pz.clear();
-  
+  particle_raw_pt.clear();
+  particle_raw_eta.clear();
+  particle_raw_phi.clear();
+  particle_raw_energy.clear();
+  particle_raw_mass.clear();
+  particle_raw_px.clear();
+  particle_raw_py.clear();
+  particle_raw_pz.clear();
+
+  particle_puppi_pt.clear();
+  particle_puppi_eta.clear();
+  particle_puppi_phi.clear();
+  particle_puppi_energy.clear();
+  particle_puppi_mass.clear();
+  particle_puppi_px.clear();
+  particle_puppi_py.clear();
+  particle_puppi_pz.clear();
+
   particle_charge.clear();
   particle_pdgId.clear();
-  
+
   particle_dz.clear();
   particle_dxy.clear();
-  
+
   particle_puppiWeight.clear();
   particle_fromPV.clear();
   particle_pvAssociationQuality.clear();
@@ -1410,14 +1476,9 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
   particle_match_dr2.clear();
   particle_truthLabel.clear();
 
-  particle_oldAlgoLabel.clear();
-  particle_oldAlgoAK4Label.clear();
-  particle_oldAlgoAK8Index.clear();
-  particle_oldAlgoCA8Index.clear();
-
-  particle_newAlgoLabel.clear();
-  particle_newAlgoAKIndex.clear();
-  particle_newAlgoCAIndex.clear();
+  particle_algorithmLabel.clear();
+  particle_algorithmAKIndex.clear();
+  particle_algorithmCAIndex.clear();
 
   ak_pt.clear();
   ak_eta.clear();
@@ -1468,7 +1529,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     gen_t_W_q1[i] = {};
     gen_t_b[i] = {};
   }
-  
+
   // Retrieve collections
 
   edm::Handle<reco::VertexCollection> vertices;
@@ -1500,21 +1561,30 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
 
   // Reserve vector space
 
-  particle_pt.reserve(packedPFCands->size());
-  particle_eta.reserve(packedPFCands->size());
-  particle_phi.reserve(packedPFCands->size());
-  particle_energy.reserve(packedPFCands->size());
-  particle_mass.reserve(packedPFCands->size());
-  particle_px.reserve(packedPFCands->size());
-  particle_py.reserve(packedPFCands->size());
-  particle_pz.reserve(packedPFCands->size());
-  
+  particle_raw_pt.reserve(packedPFCands->size());
+  particle_raw_eta.reserve(packedPFCands->size());
+  particle_raw_phi.reserve(packedPFCands->size());
+  particle_raw_energy.reserve(packedPFCands->size());
+  particle_raw_mass.reserve(packedPFCands->size());
+  particle_raw_px.reserve(packedPFCands->size());
+  particle_raw_py.reserve(packedPFCands->size());
+  particle_raw_pz.reserve(packedPFCands->size());
+
+  particle_puppi_pt.reserve(packedPFCands->size());
+  particle_puppi_eta.reserve(packedPFCands->size());
+  particle_puppi_phi.reserve(packedPFCands->size());
+  particle_puppi_energy.reserve(packedPFCands->size());
+  particle_puppi_mass.reserve(packedPFCands->size());
+  particle_puppi_px.reserve(packedPFCands->size());
+  particle_puppi_py.reserve(packedPFCands->size());
+  particle_puppi_pz.reserve(packedPFCands->size());
+
   particle_charge.reserve(packedPFCands->size());
   particle_pdgId.reserve(packedPFCands->size());
-  
+
   particle_dz.reserve(packedPFCands->size());
   particle_dxy.reserve(packedPFCands->size());
-  
+
   particle_puppiWeight.reserve(packedPFCands->size());
   particle_fromPV.reserve(packedPFCands->size());
   particle_pvAssociationQuality.reserve(packedPFCands->size());
@@ -1523,14 +1593,9 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
   particle_vy.reserve(packedPFCands->size());
   particle_vz.reserve(packedPFCands->size());
 
-  particle_oldAlgoLabel.reserve(packedPFCands->size());
-  particle_oldAlgoAK4Label.reserve(packedPFCands->size());
-  particle_oldAlgoAK8Index.reserve(packedPFCands->size());
-  particle_oldAlgoCA8Index.reserve(packedPFCands->size());
-
-  particle_newAlgoLabel.reserve(packedPFCands->size());
-  particle_newAlgoAKIndex.reserve(packedPFCands->size());
-  particle_newAlgoCAIndex.reserve(packedPFCands->size());
+  particle_algorithmLabel.reserve(packedPFCands->size());
+  particle_algorithmAKIndex.reserve(packedPFCands->size());
+  particle_algorithmCAIndex.reserve(packedPFCands->size());
 
   ak8_pt.reserve(ak8Jets->size());
   ak8_eta.reserve(ak8Jets->size());
@@ -1558,20 +1623,6 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
   event = iEvent.id().event();
   nPV = vertices->size();
 
-  // Determine AK8 jet membership for each PF candidate
-  std::vector<int> ak8Membership(packedPFCands->size(), -1);
-
-  for (size_t jetIdx = 0; jetIdx < ak8Jets->size(); ++jetIdx) {
-
-    const auto& jet = (*ak8Jets)[jetIdx];
-
-    for (const auto& daughter : jet.daughterPtrVector()) {
-
-      if (daughter.key() < ak8Membership.size())
-          ak8Membership[daughter.key()] = jetIdx;
-    }
-  }
-
   // Fill ak8 jet information
   for (const auto& jet : *ak8Jets) {
 
@@ -1595,21 +1646,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     // Only run if want to see all userFloats
     //for (const auto& name : jet.userFloatNames()) std::cout << name << std::endl;
     //for (const auto& pair : jet.getPairDiscri()) std::cout << pair.first << " : " << pair.second << std::endl;
-    
-  }
 
-  // Determine AK4 jet membership for each PF candidate
-  std::vector<int> ak4Membership(packedPFCands->size(), -1);
-
-  for (size_t jetIdx = 0; jetIdx < ak4Jets->size(); ++jetIdx) {
-
-    const auto& jet = (*ak4Jets)[jetIdx];
-
-    for (const auto& daughter : jet.daughterPtrVector()) {
-
-      if (daughter.key() < ak4Membership.size())
-          ak4Membership[daughter.key()] = jetIdx;
-    }
   }
 
   // Fill ak4 jet information
@@ -1635,21 +1672,34 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
   // Fill particle information
   for (const auto& p : *packedPFCands) {
 
-    particle_pt.push_back(p.pt());
-    particle_eta.push_back(p.eta());
-    particle_phi.push_back(p.phi());
-    particle_energy.push_back(p.energy());
-    particle_mass.push_back(p.mass());
-    particle_px.push_back(p.px());
-    particle_py.push_back(p.py());
-    particle_pz.push_back(p.pz());
-  
+    const TLorentzVector puppiP4 = makePuppiP4(p);
+
+    particle_raw_pt.push_back(p.pt());
+    particle_raw_eta.push_back(p.eta());
+    particle_raw_phi.push_back(p.phi());
+    particle_raw_energy.push_back(p.energy());
+    particle_raw_mass.push_back(p.mass());
+    particle_raw_px.push_back(p.px());
+    particle_raw_py.push_back(p.py());
+    particle_raw_pz.push_back(p.pz());
+
+    particle_puppi_pt.push_back(puppiP4.Pt());
+    // PUPPI rescales the four-vector without changing its direction. Retain
+    // the measured direction even for candidates whose PUPPI weight is zero.
+    particle_puppi_eta.push_back(p.eta());
+    particle_puppi_phi.push_back(p.phi());
+    particle_puppi_energy.push_back(puppiP4.E());
+    particle_puppi_mass.push_back(puppiP4.M());
+    particle_puppi_px.push_back(puppiP4.Px());
+    particle_puppi_py.push_back(puppiP4.Py());
+    particle_puppi_pz.push_back(puppiP4.Pz());
+
     particle_charge.push_back(p.charge());
     particle_pdgId.push_back(p.pdgId());
-  
+
     particle_dz.push_back(p.dz());
     particle_dxy.push_back(p.dxy());
-  
+
     particle_puppiWeight.push_back(p.puppiWeight());
     particle_fromPV.push_back(p.fromPV());
     particle_pvAssociationQuality.push_back(p.pvAssociationQuality());
@@ -1659,11 +1709,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     particle_vz.push_back(p.vz());
   }
 
-  for (long unsigned int i = 0; i < packedPFCands->size(); ++i) {
-    particle_oldAlgoAK4Label.push_back(ak4Membership[i]);
-  } // ak8 membership done later
-
-  nParticles = particle_pt.size();
+  nParticles = particle_raw_pt.size();
 
   // Fill MET information
   if (!mets->empty()) {
@@ -1719,8 +1765,8 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
       else {
         gen_chi_ptr[1] = tmp_gen_chi_ptr_0;
         gen_chi_ptr[0] = tmp_gen_chi_ptr_1;
-      }  
-      
+      }
+
       fillParticle(gen_chi_ptr[0], gen_chi[0]);
       fillParticle(gen_chi_ptr[1], gen_chi[1]);
 
@@ -1754,7 +1800,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     const reco::Candidate* gen_chi_ptr_temp = gen_chi_ptr[idx];
 
     if (!gen_chi_ptr_temp) continue;
-    
+
     for (unsigned int i=0; i<gen_chi_ptr_temp->numberOfDaughters(); i++) { // for each chi daughter
 
       const reco::Candidate* daughter = findLastCopy(gen_chi_ptr_temp->daughter(i));
@@ -1860,7 +1906,7 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
 
   // Find and fill truth information on each PF particle's ancestry, using delta R matching between PF cands and generator particles.
   // Build spatial hash map taking in eta, phi of PF candidate and outputting list of gen particles within 3x3 cell grid of that region.
-  
+
   // Cell size constants, delta R^2 limit, testing values for optimal truth matching
   constexpr float ETA_BIN = 0.2;
   constexpr float PHI_BIN = 0.2;
@@ -1940,17 +1986,17 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
     if (bestGen) {
       truthLabel_set = getTruthLabel(bestGen,
 
-                                    gen_W_q0_ptr, 
-                                    gen_W_q1_ptr, 
+                                    gen_W_q0_ptr,
+                                    gen_W_q1_ptr,
                                     gen_b_ptr,
-                                    gen_Z_q0_ptr, 
+                                    gen_Z_q0_ptr,
                                     gen_Z_q1_ptr,
-                                    gen_h_q0_ptr, 
+                                    gen_h_q0_ptr,
                                     gen_h_q1_ptr,
-                                    gen_t_W_q0_ptr, 
-                                    gen_t_W_q1_ptr, 
+                                    gen_t_W_q0_ptr,
+                                    gen_t_W_q1_ptr,
                                     gen_t_b_ptr);
-      
+
       for (int truthLabel: truthLabel_set) {
         truthLabel_vec.push_back(truthLabel);
       }
@@ -1966,33 +2012,19 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
 
   } // end loop over pf cands
 
-  // Run old jet sorting algorithm using slimmedJetsAK8.
+  // Produce one coherent teacher and one selected AK input definition.  In
+  // slimmed mode this is the fixed CMS-AK8 reference; in packed mode it is the
+  // configurable reclustering algorithm.
+  const bool useSlimmedAK8 = algorithmMode_ == "slimmed";
+  JetSortingAlgorithm algorithm(
+      jetPtCut_, akRadius_, caRadius_, cosThrust_, useSlimmedAK8);
+  algorithm.run(*packedPFCands, *ak8Jets);
 
-  // particle_oldAlgoAK8Index is filled separately from the complete input
-  // collection; oldAlg.akJet_indices() contains only selected input jets.
-  oldJetSortingAlgorithm oldAlg(jetPtCut_, akRadius_, caRadius_, cosThrust_, true);
+  particle_algorithmLabel = algorithm.labels();
+  particle_algorithmAKIndex = algorithm.akJet_indices();
+  particle_algorithmCAIndex = algorithm.caJet_indices();
 
-  oldAlg.run(*packedPFCands, *ak8Jets);
-
-  particle_oldAlgoLabel = oldAlg.labels();
-  // Membership in the complete slimmedJetsAK8 collection.
-  // This intentionally includes jets below jetPtCut_ so that the evaluation
-  // can rescan the AK8 pT threshold. Membership above jetPtCut_ remains the same.
-  particle_oldAlgoAK8Index = ak8Membership;
-  particle_oldAlgoCA8Index = oldAlg.caJet_indices();
-
-  // push_back already done by corrected AK8 jets
-
-  // Run old jet sorting algorithm using custom jets
-  oldJetSortingAlgorithm newAlg(jetPtCut_, akRadius_, caRadius_, cosThrust_, false);
-
-  newAlg.run(*packedPFCands, *ak8Jets);
-
-  particle_newAlgoLabel = newAlg.labels();
-  particle_newAlgoAKIndex = newAlg.akJet_indices();
-  particle_newAlgoCAIndex = newAlg.caJet_indices();
-
-  for (const auto& jet : newAlg.akJets()) {
+  for (const auto& jet : algorithm.akJets()) {
     ak_pt.push_back(jet.p4.Pt());
     ak_eta.push_back(jet.p4.Eta());
     ak_phi.push_back(jet.p4.Phi());
@@ -2000,17 +2032,31 @@ void ParticleTransformerNtuplizer::analyze(const edm::Event& iEvent,
   }
 
   // Check assignments are correct size
-  const size_t nPF = particle_pt.size();
+  const size_t nPF = particle_raw_pt.size();
 
-  assert(particle_truthLabel.size()       == nPF);
+  assert(particle_raw_eta.size()       == nPF);
+  assert(particle_raw_phi.size()       == nPF);
+  assert(particle_raw_energy.size()    == nPF);
+  assert(particle_raw_mass.size()      == nPF);
+  assert(particle_raw_px.size()        == nPF);
+  assert(particle_raw_py.size()        == nPF);
+  assert(particle_raw_pz.size()        == nPF);
 
-  assert(particle_oldAlgoLabel.size()     == nPF);
-  assert(particle_oldAlgoAK8Index.size()  == nPF);
-  assert(particle_oldAlgoCA8Index.size()   == nPF);
+  assert(particle_puppi_pt.size()      == nPF);
+  assert(particle_puppi_eta.size()     == nPF);
+  assert(particle_puppi_phi.size()     == nPF);
+  assert(particle_puppi_energy.size()  == nPF);
+  assert(particle_puppi_mass.size()    == nPF);
+  assert(particle_puppi_px.size()      == nPF);
+  assert(particle_puppi_py.size()      == nPF);
+  assert(particle_puppi_pz.size()      == nPF);
+  assert(particle_puppiWeight.size()   == nPF);
 
-  assert(particle_newAlgoLabel.size()     == nPF);
-  assert(particle_newAlgoAKIndex.size()   == nPF);
-  assert(particle_newAlgoCAIndex.size()   == nPF);
+  assert(particle_truthLabel.size()    == nPF);
+
+  assert(particle_algorithmLabel.size()   == nPF);
+  assert(particle_algorithmAKIndex.size() == nPF);
+  assert(particle_algorithmCAIndex.size() == nPF);
 
   // Fill tree
   tree_->Fill();
@@ -2063,6 +2109,8 @@ void ParticleTransformerNtuplizer::fillDescriptions(
     edm::InputTag("slimmedGenJetsAK8"));
 
   desc.add<bool>("isMC", true);
+
+  desc.add<std::string>("algorithmMode", "slimmed");
 
   desc.add<double>("jetPtCut", 300.0);
 
